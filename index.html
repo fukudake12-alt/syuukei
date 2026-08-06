@@ -544,48 +544,36 @@ function lawToText(lawCode) {
 }
 
 // ---- LINE No.から配管クラス／ガスケットクラス／断熱仕様を読み取る ----
-// LINE No.は「-」区切りの複数セグメントで構成され（例：200A-NH3(G)-20A/47-C5(C40)）、
-// このうち「/」を含むセグメント（例："20A/47"）が配管クラス／ガスケットクラスの対）で、
-// 「/」より前が配管クラス（例："20A"）、「/」以降（"/"を含む）がガスケットクラス（例："/47"）。
-// さらにその次のセグメント（例："C5(C40)"）の括弧より前の部分（例："C5"）が断熱仕様に対応する。
-// （以前は先頭セグメントをそのまま配管クラスとしていたが、実際の図面では先頭は配管サイズで
-// あり、配管クラスは「/」を含むセグメントの前半部分だった。テンプレートによって差異が
-// あり得るため、Excel出力後に必ず内容を確認すること。）
+// LINE No.は「サイズ-流体名-配管クラス(/ガスケットクラス)-断熱仕様(...)」という決まった
+// 並び順（例："200A-NH3(G)-20A/47-C5(C40)"）になっている。配管クラスのセグメントは
+// 常に3番目（0始まりでindex2）にあり、ガスケットクラスが併記される場合は同じセグメント内に
+// "/"区切りで入る。さらにその次のセグメント（例："C5(C40)"）の括弧より前の部分（例："C5"）が
+// 断熱仕様に対応する。
+// （以前は「"/"を含むセグメント」を探して配管クラスの位置を特定していたが、ガスケットクラスが
+// 存在せず"/"が1つも無い図面（例："40A-S2-3-H3(t65)"）では検索に失敗し、先頭セグメント＝配管
+// サイズを誤って配管クラスとして拾ってしまっていた。セグメントを「/」の有無ではなく位置で
+// 直接指定する方式に変更し、この誤りを防ぐ。テンプレートによって並び順に差異があり得るため、
+// Excel出力後に必ず内容を確認すること。）
 function extractPipeAndGasketClass(lineNo) {
   const s = String(lineNo || '').trim();
   if (!s) return { pipeClass: '', gasketClass: '', insulationSpec: '' };
   const segments = s.split('-');
-  // 配管クラス／ガスケットクラスのセグメントを探す。まれに流体名側のセグメントにも
-  // 「/」が含まれる書式がある（例："50A-N2/CP29H-7/13"の"N2/CP29H"）ため、
-  // 「/」を含む最初のセグメントではなく最後のセグメントを配管・ガスケットクラスとみなす
-  // （実際のクラスコードはLINE No.の末尾寄りに書かれる書式が大半のため）。
-  let slashSegIdx = -1;
-  for (let i = segments.length - 1; i >= 0; i--) {
-    if (segments[i].includes('/')) { slashSegIdx = i; break; }
-  }
 
   // 配管クラス／ガスケットクラスの文字列に紛れ込む半角/全角スペース（例："20A H /47"）と、
   // 括弧書きの日本語注記（例："(大気放出)"）を除去する。前者は図面の版によりクラス記号の
   // 途中にスペースが入る書式があるため、後者はクラス欄ではなく自由記述の注記のため。
   const cleanClass = t => t.replace(/[（(][^）)]*[）)]/g, '').replace(/[\s\u3000]/g, '');
 
-  if (slashSegIdx >= 0) {
-    const seg = segments[slashSegIdx];
-    const slashIdx = seg.indexOf('/');
-    const pipeClass = cleanClass(seg.slice(0, slashIdx)).toUpperCase();
-    const gasketClass = cleanClass(seg.slice(slashIdx)); // "/"を含めて後ろ全部（このセグメント内のみ）
-    const nextSeg = segments[slashSegIdx + 1] || '';
-    const m = nextSeg.match(/^([A-Za-z0-9]+)/);
-    const insulationSpec = m ? m[1].toUpperCase() : '';
-    return { pipeClass, gasketClass, insulationSpec };
-  }
+  const classSeg = segments[2];
+  if (classSeg === undefined) return { pipeClass: '', gasketClass: '', insulationSpec: '' };
 
-  // 「/」を含むセグメントが見つからない場合のフォールバック（従来ロジック）
-  const dashIdx = s.indexOf('-');
-  const pipeClass = cleanClass(dashIdx >= 0 ? s.slice(0, dashIdx) : s).toUpperCase();
-  const slashIdx = s.indexOf('/');
-  const gasketClass = slashIdx >= 0 ? cleanClass(s.slice(slashIdx)) : '';
-  return { pipeClass, gasketClass, insulationSpec: '' };
+  const slashIdx = classSeg.indexOf('/');
+  const pipeClass = cleanClass(slashIdx >= 0 ? classSeg.slice(0, slashIdx) : classSeg).toUpperCase();
+  const gasketClass = slashIdx >= 0 ? cleanClass(classSeg.slice(slashIdx)) : ''; // "/"を含めて後ろ全部
+  const nextSeg = segments[3] || '';
+  const m = nextSeg.match(/^([A-Za-z0-9]+)/);
+  const insulationSpec = m ? m[1].toUpperCase() : '';
+  return { pipeClass, gasketClass, insulationSpec };
 }
 
 // ---- 支給/転用タグを「材料集計(図面別)」シートJ列(支給/転用)向けの表示文字列に変換 ----
@@ -735,7 +723,7 @@ const MATERIAL_ROW_DEFS = [
   { key: 'VALVE',        test: s => s === 'VALVE' || ['ボール弁', 'チェッキ弁', 'ゲート弁', '仕切弁', 'グローブ弁', 'バタフライ弁', '安全弁', '逆止弁', '電磁弁', 'ストップ弁'].includes(s) },
   { key: 'COUPLING',     test: s => s === 'COUPLING' || s === 'コネクター' },
   { key: 'BOSS',         test: s => s === 'BOSS' },
-  { key: 'BF加工品',      test: s => s === 'BF加工品' },
+  { key: 'BF加工品',      test: s => String(s).replace(/[.．]/g, '') === 'BF加工品' },
   { key: 'XV',           test: s => s === 'XV' },
   // 「PSV」「PA」「PG」は図面上、それぞれ独立した品目ラベルとして並んで印字されているが、
   // 以前はPGしか認識していなかったため、PSV/PAの行データが（一番近い認識済みラベルである）
@@ -869,8 +857,8 @@ function extractMaterials(annots, textContent, viewport) {
     const s = (it.str || '').trim();
     for (const def of MATERIAL_ROW_DEFS) {
       if (def.test(s)) {
-        const [, vy] = viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
-        anchors.push({ key: def.key, y: vy, label: s });
+        const [vx, vy] = viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
+        anchors.push({ key: def.key, y: vy, x: vx, label: s });
         break;
       }
     }
@@ -881,6 +869,43 @@ function extractMaterials(annots, textContent, viewport) {
   // buildRowBands側で同一キーは先頭（Y座標が最小＝最初に見つかったもの）のみ
   // 採用されるため問題ない。
   anchors.push(...collectVerticalAnchors(textContent, viewport, bounds.boundLeft));
+
+  // MATERIAL_ROW_DEFSに未登録の品目（例：Yストレーナー、スチームトラップ等、
+  // テンプレートに新たに追加された品目）も取りこぼさないよう、品目ラベル列に印字
+  // されている未知のテキストを、その文字列自体を品目名としてアンカー化する。
+  //
+  // 実データで座標を確認したところ、品目ラベル（VALVE/FLANGE/新規品目等）はいずれも
+  // SIZE列のすぐ左、幅120pt程度の狭い帯に収まっている一方、改訂履歴欄・流体条件欄等の
+  // 無関係なラベル（TITLE/REV./KPa/内部流体名称等）はそこから大きく離れた位置
+  // （さらに左）にある。そのため「SIZE列の左端から一定幅の帯」だけを対象にすることで、
+  // 品目ラベルだけを的確に拾い、離れた場所にある別表のラベルは自動的に除外できる。
+  // （品目ラベル文字列は長さがまちまちで左揃え位置が微妙にずれるため、帯は余裕を
+  // 持たせた幅にしている。）
+  const KNOWN_HEADER_TEXTS = new Set(['ITEM', 'SIZE', 'DESCRIPTION', 'QTY']);
+  const NOISE_LABEL_PATTERN = /^[\d.,:：%\-\/]+$/;
+  const BOLT_CONTINUATION_PATTERN = /^(MACHINE|マシン|STUD|スタッド|&|NUT|ナット)$/i;
+  // 図面の情報欄・検査欄に定型で出てくるラベル（品目ではない）。上記の帯による絞り込みに
+  // 加えた保険として、既知の紛れ込みやすいものを明示的にも除外しておく。
+  const NON_ITEM_LABEL_PATTERN = /^(LINE|TITLE|ISOME|REV\.?|CLIENT|JOB|JOB\s*NO\.?|DRAWING\s*NO\.?|NO\.?|プレファブ溶接部|現場溶接部|非破壊検査|耐圧試験媒体\/?圧力?|気密試験媒体\/?圧力?|W部|BW部|SW部|内部流体名称|設計圧力|設計温度|溶接後熱処理|断熱|適用法規|NONE|ORIGINAL|DRAFT|CHECKED|APPROVED|DATE|KPa)$/i;
+  const tableTopY = Math.min(...Object.values(headerCandidates).map(h => h.y));
+  // 品目ラベル列の帯：SIZE列の左端（boundLeft）から、列幅(colW)の2.5倍（余裕を持たせた値）
+  // だけ左に広げた範囲。実データでは品目ラベルはboundLeftの60pt程度手前までに収まって
+  // おり、無関係な別表のラベルはさらに数百pt左にあるため、この帯で十分に区別できる。
+  const colWForBand = bounds.boundSizeDesc - bounds.boundLeft;
+  const itemLabelBandLeft = bounds.boundLeft - Math.max(80, colWForBand * 2.5);
+  for (const it of textContent.items) {
+    const s = (it.str || '').trim();
+    if (!s || s.length < 2) continue;
+    if (KNOWN_HEADER_TEXTS.has(s.toUpperCase())) continue;
+    if (NOISE_LABEL_PATTERN.test(s)) continue;
+    if (BOLT_CONTINUATION_PATTERN.test(s)) continue;
+    if (NON_ITEM_LABEL_PATTERN.test(s)) continue;
+    if (MATERIAL_ROW_DEFS.some(def => def.test(s))) continue; // 既知品目は上のループで処理済み
+    const [vx, vy] = viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
+    if (vx >= bounds.boundLeft || vx < itemLabelBandLeft) continue; // 品目ラベル列の帯から外れたものは対象外
+    if (vy < tableTopY) continue; // 見出し行より上（表の外）は対象外
+    anchors.push({ key: s, y: vy, x: vx, label: s, isDynamic: true });
+  }
 
   // 「MACHINE BOLT & NUT」等は、テンプレートによって「MACHINE BOLT」「&」「NUT」のように
   // 複数行に分けて印字されている場合がある。このとき2つの問題が起きる。
@@ -1279,7 +1304,7 @@ const COLUMN_DEFS = [
   { col: 'I', header: 'ITEM',          autoFilled: true,  get: r => r.item },
   { col: 'J', header: 'サイズ',         autoFilled: true,  get: r => r.size },
   { col: 'K', header: '材質',           autoFilled: true,  get: r => r.material },
-  { col: 'L', header: '数量',           autoFilled: true,  get: r => r.qty },
+  { col: 'L', header: '数量',           autoFilled: true,  get: r => r.qty, numeric: true },
   { col: 'M', header: '単位',           autoFilled: false },
   { col: 'N', header: '総M',            autoFilled: false },
   { col: 'O', header: '支給/転用',      autoFilled: true,  get: r => r.tagText },
@@ -1297,7 +1322,7 @@ function columnDisplayValue(def, r) {
   if (!def.autoFilled) return '';
   const v = def.get(r);
   if (v === null || v === undefined || v === '') return '';
-  if (def.col === 'R') return Number(v).toFixed(3);
+  if (def.col === 'R') return Number(v).toFixed(2);
   return v;
 }
 
@@ -1511,8 +1536,21 @@ function writeMaterialRow(ws, r, d, styleCache) {
   }
   COLUMN_DEFS.forEach(def => {
     if (!def.autoFilled) return; // 自動抽出できない列はテンプレートの値のまま（空欄）にしておく
-    const v = def.get(d);
-    row.getCell(def.col).value = (v === '' || v === undefined) ? null : v;
+    let v = def.get(d);
+    if (v === '' || v === undefined) v = null;
+    // 数量・重量は、SUM等の数式でそのまま集計できるよう、Excel上も数値セルとして
+    // 書き込む（文字列のままだとSUMが0扱い・エラーになるため）。
+    // 「20A 15A」のように空白区切りで複数値が結合されてしまっている等、単純な数値に
+    // 変換できない場合は元の文字列のまま出力する（数式が使えない旨は別途目視で気づける）。
+    if (def.numeric && v !== null) {
+      const n = Number(v);
+      if (!Number.isNaN(n) && String(v).trim() !== '') {
+        // 重量(R列)は0.01単位で十分なため、書き込み時点で丸めておく
+        // （プレビュー表示の桁数とも一致させる）。
+        v = def.col === 'R' ? Math.round(n * 100) / 100 : n;
+      }
+    }
+    row.getCell(def.col).value = v;
   });
   applyUniformBorder(row);
   row.commit();
