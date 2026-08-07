@@ -545,32 +545,42 @@ function lawToText(lawCode) {
 
 // ---- LINE No.から配管クラス／ガスケットクラス／断熱仕様を読み取る ----
 // LINE No.は「サイズ-流体名-配管クラス(/ガスケットクラス)-断熱仕様(...)」という決まった
-// 並び順（例："200A-NH3(G)-20A/47-C5(C40)"）になっている。配管クラスのセグメントは
-// 常に3番目（0始まりでindex2）にあり、ガスケットクラスが併記される場合は同じセグメント内に
-// "/"区切りで入る。さらにその次のセグメント（例："C5(C40)"）の括弧より前の部分（例："C5"）が
-// 断熱仕様に対応する。
-// （以前は「"/"を含むセグメント」を探して配管クラスの位置を特定していたが、ガスケットクラスが
-// 存在せず"/"が1つも無い図面（例："40A-S2-3-H3(t65)"）では検索に失敗し、先頭セグメント＝配管
-// サイズを誤って配管クラスとして拾ってしまっていた。セグメントを「/」の有無ではなく位置で
-// 直接指定する方式に変更し、この誤りを防ぐ。テンプレートによって並び順に差異があり得るため、
-// Excel出力後に必ず内容を確認すること。）
+// 並び順（例："200A-NH3(G)-20A/47-C5(C40)"）になっているが、図面によっては配管クラスの手前に
+// 「ライン番号（管理用の通し番号。例："7012"）」という余分なセグメントが挟まる書式がある
+// （例："80A-GAS(EVAC)-7012-6/2"）。この場合、配管クラスは3番目（index2）ではなく
+// 4番目（index3）にずれる。
+// ライン番号セグメントには基本的に"/"が含まれない一方、配管クラスは「配管クラス/ガスケット
+// クラス」という書式が必ず守られているため、位置を固定するのではなく「segments[2]以降で
+// 最初に"/"を含むセグメント」を配管クラスとして探索する方式にする。
+// （探索開始をsegments[1]の流体名からではなくsegments[2]からにすることで、"50A-N2/CP29H-7/13"
+// のように流体名側に"/"が入るケースを誤検出しないようにしている。）
+// ガスケットクラスが存在せず"/"が1つも無い図面（例："40A-S2-3-H3(t65)"）では、
+// 従来通りsegments[2]をそのまま配管クラスとして採用するフォールバックを維持する。
 function extractPipeAndGasketClass(lineNo) {
   const s = String(lineNo || '').trim();
   if (!s) return { pipeClass: '', gasketClass: '', insulationSpec: '' };
   const segments = s.split('-');
+  if (segments[2] === undefined) return { pipeClass: '', gasketClass: '', insulationSpec: '' };
 
   // 配管クラス／ガスケットクラスの文字列に紛れ込む半角/全角スペース（例："20A H /47"）と、
   // 括弧書きの日本語注記（例："(大気放出)"）を除去する。前者は図面の版によりクラス記号の
   // 途中にスペースが入る書式があるため、後者はクラス欄ではなく自由記述の注記のため。
   const cleanClass = t => t.replace(/[（(][^）)]*[）)]/g, '').replace(/[\s\u3000]/g, '');
 
-  const classSeg = segments[2];
-  if (classSeg === undefined) return { pipeClass: '', gasketClass: '', insulationSpec: '' };
+  // segments[2]以降で最初に"/"を含むセグメントのインデックスを探す（見つからなければ-1）。
+  let classIdx = -1;
+  for (let i = 2; i < segments.length; i++) {
+    if (segments[i].indexOf('/') >= 0) { classIdx = i; break; }
+  }
+  // "/"を含むセグメントが1つも無い場合は、従来通りsegments[2]をそのまま配管クラスとして扱う
+  // （ガスケットクラス併記が無い図面向けのフォールバック）。
+  if (classIdx === -1) classIdx = 2;
 
+  const classSeg = segments[classIdx];
   const slashIdx = classSeg.indexOf('/');
   const pipeClass = cleanClass(slashIdx >= 0 ? classSeg.slice(0, slashIdx) : classSeg).toUpperCase();
   const gasketClass = slashIdx >= 0 ? cleanClass(classSeg.slice(slashIdx)) : ''; // "/"を含めて後ろ全部
-  const nextSeg = segments[3] || '';
+  const nextSeg = segments[classIdx + 1] || '';
   const m = nextSeg.match(/^([A-Za-z0-9]+)/);
   const insulationSpec = m ? m[1].toUpperCase() : '';
   return { pipeClass, gasketClass, insulationSpec };
