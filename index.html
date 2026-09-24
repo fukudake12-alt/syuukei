@@ -3046,6 +3046,16 @@ function buildMaterialRowFromCluster(cluster, bounds, band) {
   // 数量は本来「数字（小数点を含んでもよい）のみ」のはずなので、QTY欄に振り分けられた
   // セルのうち数字だけで構成されていないもの（BW・SW・t1.5等）は、座標判定の結果を
   // 内容で補正し、DESCRIPTION欄側へ回す。
+  // 図面の数量欄に、数字の0の代わりに英字の「O」「o」で「O.3」のように入力されている
+  // ことがある（例：PIPEの数量 0.3m が「O.3」）。数字・小数点・O/oだけで構成され、
+  // 数字を1つ以上含むものは、O/oを0に置き換えて数量として扱う。
+  qtyParts = qtyParts.map(p => {
+    const t = normalizeWidthAndSpaces(p[1] || '');
+    if (/^[0-9Oo]*\.?[0-9Oo]*$/.test(t) && /[0-9]/.test(t) && /[Oo]/.test(t)) {
+      return [p[0], t.replace(/[Oo]/g, '0')];
+    }
+    return p;
+  });
   const isPureQtyValue = t => /^[0-9]+(?:\.[0-9]+)?$/.test(normalizeWidthAndSpaces(t || ''));
   const misclassifiedIntoQty = qtyParts.filter(p => !isPureQtyValue(p[1]));
   if (misclassifiedIntoQty.length) {
