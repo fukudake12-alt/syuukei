@@ -1946,6 +1946,12 @@ async function analyzePage(pdf, pageNum) {
     }
   } else {
     materials = extractMaterials(annots, textContent, viewport);
+    // テキスト抽出のみ（OCR OFF）の場合、SIZE・DESCRIPTION・QTYが3欄とも空の品目（帯だけ
+    // 検出され、値が1件も見つからなかったテンプレート上の未使用行）が「空のプレースホルダー行」
+    // として残り、Excelに黄色の空行として大量に出力されていた（例：ガスケットとボルトナット
+    // しか使っていない図面で、PIPE・エルボ・TEE・レデューサー・FLANGE等まで出力される）。
+    // OCR経路（enhanceRowsWithOCR）では従来から同じ除外処理をしていたため、こちらも揃える。
+    materials = dropEmptyPlaceholderRows(materials, unreadItems);
   }
 
   // OCR補完版で追加：OCRが例外で失敗した場合（＝「そもそも記入が無かった」のではなく
@@ -2462,11 +2468,6 @@ function extractMaterials(annots, textContent, viewport) {
   const bounds = computeMaterialColumns(headerCandidates);
   if (!bounds) return []; // 材料表の見出しが見つからないページ（親図・図書リスト等）は対象外
 
-  // 品目ラベル列の帯：SIZE列の左端（boundLeft）から、列幅(colW)の2.5倍（余裕を持たせた値）
-  // だけ左に広げた範囲。品目アンカー検出全体（既知品目・動的品目の両方）で使い回す。
-  const colWForBand = bounds.boundSizeDesc - bounds.boundLeft;
-  const itemLabelBandLeft = bounds.boundLeft - Math.max(80, colWForBand * 2.5);
-
   // 注釈の平均文字高さ（行の帯の判定・複数行ラベルの結合判定の両方で使う目安値）。
   // テンプレートによって文字サイズが多少変わるため固定値にせず実データから推定する。
   let heightSum = 0, heightCount = 0;
@@ -2480,24 +2481,12 @@ function extractMaterials(annots, textContent, viewport) {
   const avgH = heightCount ? heightSum / heightCount : 8;
 
   // ---- 行の帯（品目ラベルのY座標→隣接ラベルの中間点で境界決定） ----
-  // v36で修正：以前はページ全体のテキストを対象に「45°」等のMATERIAL_ROW_DEFSと
-  // 完全一致する文字列を無条件でアンカー化していた。この社内テンプレートでは
-  // 等角図側の寸法・角度表記（例：「V.45°」が「V.」「45°」の2つのテキスト片に
-  // 分かれて印字される）にも品目ラベルと同じ「45°」という文字列がそのまま
-  // 出現することがあり、これが表とは無関係な位置で品目ラベルの帯として
-  // 誤って拾われてしまっていた（結果、本来は45°ELBOWの帯であるべき位置ではなく、
-  // 等角図側の「45°」のY座標を基準に帯が作られ、表の下の方の行―XVの3件目等―が
-  // 誤ってこの帯に巻き込まれて品目名が「45°ELBOW」に化ける不具合の原因になっていた）。
-  // 動的品目（未登録品目名）の検出では元々「品目ラベル列の帯（itemLabelBandLeft〜
-  // boundLeft）」だけに絞り込んでいたため、既知品目（MATERIAL_ROW_DEFS）側の検出にも
-  // 同じX範囲の絞り込みを適用し、表の外にある同じ文字列を拾わないようにする。
   const anchors = [];
   for (const it of textContent.items) {
     const s = (it.str || '').trim();
     for (const def of MATERIAL_ROW_DEFS) {
       if (def.test(s)) {
         const [vx, vy] = viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
-        if (vx >= bounds.boundLeft || vx < itemLabelBandLeft) break; // 品目ラベル列の帯から外れたものは対象外
         anchors.push({ key: def.key, y: vy, x: vx, label: s });
         break;
       }
@@ -2521,8 +2510,6 @@ function extractMaterials(annots, textContent, viewport) {
   // 品目ラベルだけを的確に拾い、離れた場所にある別表のラベルは自動的に除外できる。
   // （品目ラベル文字列は長さがまちまちで左揃え位置が微妙にずれるため、帯は余裕を
   // 持たせた幅にしている。）
-  // （品目ラベル帯の左端 itemLabelBandLeft は、上の既知品目アンカー検出と共通の値を
-  // 既に計算済みのためここでは再計算しない。）
   const KNOWN_HEADER_TEXTS = new Set(['ITEM', 'SIZE', 'DESCRIPTION', 'QTY']);
   const NOISE_LABEL_PATTERN = /^[\d.,:：%\-\/]+$/;
   // v16で修正：以前は「MACHINE」「&」「NUT」等が単独の1単語だけの行に印字されている前提で
@@ -2560,6 +2547,9 @@ function extractMaterials(annots, textContent, viewport) {
   // 品目ラベル列の帯：SIZE列の左端（boundLeft）から、列幅(colW)の2.5倍（余裕を持たせた値）
   // だけ左に広げた範囲。実データでは品目ラベルはboundLeftの60pt程度手前までに収まって
   // おり、無関係な別表のラベルはさらに数百pt左にあるため、この帯で十分に区別できる。
+  const colWForBand = bounds.boundSizeDesc - bounds.boundLeft;
+  const itemLabelBandLeft = bounds.boundLeft - Math.max(80, colWForBand * 2.5);
+
   // 品目ラベル列の帯（itemLabelBandLeft〜boundLeft）は、表題欄の「LINE No.」「CLIENT」欄
   // （発注者名等）ともX座標が重なることがある。この場合、CLIENT欄の値（会社名など）が
   // 未知の品目ラベルとして誤って拾われ、その右側の「徳山工場」「殿」等がSIZE/DESCRIPTION/
@@ -2633,8 +2623,7 @@ function extractMaterials(annots, textContent, viewport) {
   // stripHeaderLeak()はITEM/SIZE/DESCRIPTION/QTYという見出し語しか除去できないため、
   // この種の「表の外のノイズ」には無力。範囲を広げるメリットより実害の方が大きいため、
   // 表の外の文字が写り込まない見出し行の"下端＋余白"(tableHeaderBottomY)に戻す。
-  const lastRowBottomY = Number.isFinite(tableBottomY) ? tableBottomY - TABLE_BOTTOM_MARGIN : null;
-  const bands = buildRowBands(anchors, tableHeaderBottomY, lastRowBottomY);
+  const bands = buildRowBands(anchors, tableHeaderBottomY);
   if (!bands.length) return [];
 
   // ---- 値データを行の帯×列境界に振り分け ----
@@ -2643,11 +2632,31 @@ function extractMaterials(annots, textContent, viewport) {
   // 両方があるため、両方から収集する（同一テンプレートで両方に同じ値が重複することは
   // 想定していないため、単純に合算する）。
   const cells = [];
+  // 【ゴースト注釈対策】AutoCADのSHXテキスト認識では、「4」のような1つの図形が
+  // 「4」と「1」のように複数の文字として二重に認識され、同じ位置に重なった注釈が
+  // 生成されることがある（例：ガスケット数量が「4 1」になる不具合）。
+  // 別の注釈の矩形内に80%以上が完全に収まり、かつ面積が小さい注釈（内容が異なるもの）は
+  // 実在しない断片とみなして除外する。
+  const annotEntries = [];
   for (const a of annots) {
     const text = getAnnotText(a);
     if (!text) continue;
     const d = toDisplayRect(viewport, a.rect || [0, 0, 0, 0]);
-    cells.push({ yc: (d.y0 + d.y1) / 2, xc: (d.x0 + d.x1) / 2, x0: d.x0, text });
+    annotEntries.push({ d, text, area: Math.max(0, d.x1 - d.x0) * Math.max(0, d.y1 - d.y0) });
+  }
+  const overlapArea = (p, q) => {
+    const w = Math.min(p.x1, q.x1) - Math.max(p.x0, q.x0);
+    const h = Math.min(p.y1, q.y1) - Math.max(p.y0, q.y0);
+    return (w > 0 && h > 0) ? w * h : 0;
+  };
+  for (const e of annotEntries) {
+    const isGhost = annotEntries.some(o => o !== e
+      && o.text !== e.text
+      && (o.area > e.area || (o.area === e.area && o.text.length > e.text.length))
+      && e.area > 0
+      && overlapArea(e.d, o.d) >= e.area * 0.8);
+    if (isGhost) continue;
+    cells.push({ yc: (e.d.y0 + e.d.y1) / 2, xc: (e.d.x0 + e.d.x1) / 2, x0: e.d.x0, text: e.text });
   }
   const headerTexts = new Set(['ITEM', 'SIZE', 'DESCRIPTION', 'QTY']);
   for (const it of textContent.items) {
@@ -2808,20 +2817,7 @@ function computeMaterialColumns(headerCandidates) {
 // 実害が確認された。範囲を広げるメリットより実害の方が大きいため、呼び出し元は再び
 // 見出し文字の"下端"(tableHeaderBottomY)を渡すようにする（表の外の文字を写さないことを
 // 優先し、1行目の精度低下は信頼度ベースの赤枠表示で検出する方針に切り替える）。
-// v37で追加：lastRowBottomY（表の下端。LINE No./CLIENT欄の直前）を渡せるようにした。
-// 経緯：最終品目（一番下の帯＝図面によりXV等）の帯の下端は、これまで常に
-// 「その品目ラベル自身のY座標＋4pt」で決まっていた（＝次の品目ラベルが無いので、
-// 自分自身のY座標を代用していた）。ところが品目ラベルの印字位置は必ずしも
-// その品目枠の最下段データ行より下にあるとは限らず、テンプレートによっては
-// ラベルが枠の途中（2〜3行あるデータ行の1〔2行目付近）に印字されていることがある。
-// この場合、ラベルより下にある2件目以降のデータ（例：XVが3件あるうち3件目）が
-// 帯の範囲外（y1より下）に落ちてしまい、どの帯にも属さない行としてrowsFromCells側で
-// 黙って読み捨てられてしまっていた（実害：XVの3件目が出力から消える）。
-// 次の品目ラベルが存在する場合は今まで通りそのラベルのY座標で区切れば十分
-// （次の品目のデータ行と混ざることはない）だが、次のラベルが無い＝最後の品目の場合だけは、
-// 自分のラベルのY座標ではなく「表の下端（LINE No./CLIENT欄の直前）」まで帯を広げることで、
-// この種のデータ欠落を防ぐ。
-function buildRowBands(anchors, firstRowTopY, lastRowBottomY) {
+function buildRowBands(anchors, firstRowTopY) {
   if (!anchors.length) return [];
   const sorted = [...anchors].sort((a, b) => a.y - b.y);
   const seenKeys = new Set();
@@ -2858,20 +2854,10 @@ function buildRowBands(anchors, firstRowTopY, lastRowBottomY) {
     : firstRowTop;
   // 実データで確認したところ、品目ラベルは各行の「下端」付近に位置し、
   // SIZE/DESCRIPTION/QTYの値はラベルより上側（前の行のラベルより下）に入る。
-  const lastRowBottom = Number.isFinite(lastRowBottomY) ? lastRowBottomY : null;
   return rows.map((r, i) => {
     const y0 = i === 0 ? clampedFirstRowTop : rows[i - 1].y + 4;
-    // 最後の品目だけは、次のラベルが無い代わりに表の下端（あれば）まで帯を広げる。
-    // 表の下端が取得できなかった場合（LINE No./CLIENT欄がテキストとして見つからない等）は
-    // 従来通りラベル自身のY座標を使う（安全側フォールバック）。
-    const isLast = i === rows.length - 1;
-    const coreY1 = r.y + 4; // 従来通りの（ラベル自身のY座標に基づく）本来の帯の下端
-    const extended = isLast && lastRowBottom !== null && lastRowBottom > r.y;
-    const y1 = extended ? lastRowBottom : coreY1;
-    // coreY1・extendedは、延長した分の範囲（coreY1〜y1）に入ったデータについてのみ、
-    // 「本当にこの品目のデータらしいか」を追加チェックするために呼び出し元へ渡す
-    // （LINE No.欄等、表の外側の値まで誤って拾わないようにするための安全弁）。
-    return { key: r.key, y0, y1, label: r.label, coreY1, extended };
+    const y1 = r.y + 4;
+    return { key: r.key, y0, y1, label: r.label };
   });
 }
 
@@ -2928,6 +2914,9 @@ function normalizeMaterialText(desc) {
 // フランジの表記（JISクラス＋SOP.FF/FF/RF等のフェイス記号＋SUSF304等の材質記号）は、
 // ガスケットのJISクラス＋V#（リング材番号）表記とは排他的なので、これで判別できる。
 const FLANGE_DESC_PATTERN = /^JIS\d+K.*SUSF\d+/i; // 例: JIS10K SOP.FF SUSF304
+// 鋼管（PIPE）の規格表記（例：SUS304TP-A 3.0t／SGP／STPG370）。継手の接続表記（BW・SW・SCR'D）は含まない。
+const PIPE_TUBE_DESC_PATTERN = /(?:^|[^A-Za-z])(?:TP(?:[-\s]?[AB])?|SGP|STPG\d*|STPT\d*|STPY\d*|STS\d*)(?![A-Za-z])/i;
+const FITTING_CONNECTION_PATTERN = /(?:^|[^A-Za-z])(?:BW|SW|SCR'?D?)(?![A-Za-z])/i;
 function reclassifyBoltGasket(row) {
   const isBoltDesc = BOLT_DESC_PATTERN.test(row.description);
   const isGasketDesc = !isBoltDesc && GASKET_DESC_PATTERN.test(row.description);
@@ -2953,6 +2942,14 @@ function reclassifyBoltGasket(row) {
   if (isPipeFittingDesc && (row.item === 'FLANGE' || row.item === 'BLIND FLANGE')) {
     return { ...row, item: 'TEE' };
   }
+  // PIPEの品目ラベルが行ブロックの中央に印字されている図面では、PIPEブロック後半の行
+  // （例：20A・15Aの「SUS304TP-A 3.0t」）が、次の品目（90°／45°ELBOW）の帯にはみ出して
+  // エルボとして誤分類されることがある。継手（BW・SW・SCR'D等の接続表記を持つ）ではなく、
+  // 鋼管規格（TP-A・SGP・STPG等）の表記であれば、PIPEに補正する。
+  if ((row.item === '90°ELBOW' || row.item === '45°ELBOW') &&
+      PIPE_TUBE_DESC_PATTERN.test(row.description) && !FITTING_CONNECTION_PATTERN.test(row.description)) {
+    return { ...row, item: 'PIPE', boltType: '' };
+  }
   // ハーフユニオン（銅管継手）はニップルと品目ラベルの帯位置が近く、最後の1行がNIPPLE側に
   // はみ出すことがある。「銅管継手」表記はハーフユニオン特有のため、この表記があれば補正する。
   if (row.item === 'NIPPLE' && /銅管継手/.test(row.description)) {
@@ -2967,12 +2964,6 @@ function reclassifyBoltGasket(row) {
 // （例：SIZE/DESCRIPTIONは境界の内側、材質欄だけ境界の外側）を横切った場合に、
 // 本来1行のはずのデータが2つの品目に引き裂かれてしまう。行をまとめるのを先に行うことで、
 // この「1行が品目の境界で分断される」問題を避ける。
-// v39で追加：延長した最終帯の中に入ったデータが、本当に呼び径（SIZE）を表しているかの
-// 簡易チェック用パターン。「50A」「50A×40A」「15A用」のような表記を妥当とみなす。
-// LINE No.の値（例："80A-BD(G)-7/17"）は先頭こそ「80A」で始まるが、その後に
-// このパターンが許容しない文字（ハイフン等）が続くため、末尾までの完全一致
-// （$アンカー付き）にすることで正しく除外できる。
-const VALID_SIZE_TOKEN_PATTERN = /^[0-9]+(?:\.[0-9]+)?\s*[A-Za-zＡ-Ｚａ-ｚ]{0,3}(?:\s*[×xX]\s*[0-9]+(?:\.[0-9]+)?\s*[A-Za-z]{0,3})?(?:用|#)?$/;
 function rowsFromCells(cells, bands, bounds, rowYTolerance) {
   const result = [];
   const inTable = cells.filter(c => c.xc >= bounds.boundLeft && c.xc < bounds.boundQtyEnd);
@@ -2987,18 +2978,14 @@ function rowsFromCells(cells, bands, bounds, rowYTolerance) {
   // 大きい場合は、より厳しい許容誤差で再度クラスタリングし直し、複数行に分割する。
   const fineTolerance = Math.max(1.5, rowYTolerance * 0.4);
 
-  // v37で修正：以前はまず全クラスタを帯に割り振ってresultに積み、データが1件も
-  // 無かった帯のプレースホルダー行は「その後の別ループ」でresultの末尾にまとめて
-  // 追加していた。そのため、たまたま図面上でデータの無い品目（この図面での45°ELBOW等）
-  // があると、その品目の本来の表示位置（図面上の並び順）とは無関係に、常に出力の
-  // 一番最後に出てしまっていた（一見「別の行と入れ替わった」ように見え紛らわしい）。
-  // 帯ごとに「データ行 or プレースホルダー」を1回のループでbandOutputへ積んでから
-  // 結合することで、出力順が常に帯の並び順（＝図面上の上から下の順）と一致するようにする。
-  const bandOutput = new Map(); // band.key -> この帯に属する行の配列（データ行、無ければプレースホルダー1件）
-  for (const band of bands) bandOutput.set(band.key, []);
+  const bandsWithRow = new Set();
   for (const cluster of rowClusters) {
     const clusterY = avgY(cluster);
-    const band = bands.find(b => clusterY >= b.y0 && clusterY < b.y1);
+    // 1つ目の帯（先頭行）の上端は「見出し行の下端＋余白」で切っているが、回転ページ等で
+    // 見出し文字の高さが実際より大きく見積もられると、先頭のデータ行（例：PIPEの1行目）の
+    // 中心が上端より上に外れて取りこぼされる。見出し文字の中心は先頭行の中心より十分上に
+    // あるため、先頭の帯に限り、上端を1行分の許容誤差（rowYTolerance）だけ緩めて判定する。
+    const band = bands.find((b, bi) => clusterY >= (bi === 0 ? b.y0 - rowYTolerance : b.y0) && clusterY < b.y1);
     if (!band) continue; // どの品目の帯にも属さない行（帯の外側）は対象外
 
     const ys = cluster.map(c => c.yc);
@@ -3009,16 +2996,7 @@ function rowsFromCells(cells, bands, bounds, rowYTolerance) {
 
     for (const sub of subClusters) {
       const row = buildMaterialRowFromCluster(sub, bounds, band);
-      if (!row) continue;
-      // v39で追加：最後の品目の帯は表の下端まで延長しているため（v37）、延長した
-      // 部分（coreY1より下）に入ったデータは、本当にこの品目の追加行なのか、それとも
-      // 帯の外にあるLINE No.欄の値（例：「80A-BD(G)-7/17」）等をたまたま拾って
-      // しまっただけなのかを追加で確認する。SIZE欄が呼び径表記（例："50A"「50A×40A"）
-      // として妥当な形をしていない場合は品目データではないと判断し、採用しない
-      // （＝この行は範囲外として黙って捨てる。v37修正前の「範囲外は捨てる」という
-      // 挙動に戻すだけなので、安全側の判断として問題ない）。
-      if (band.extended && avgY(sub) >= band.coreY1 && !VALID_SIZE_TOKEN_PATTERN.test(row.size)) continue;
-      bandOutput.get(band.key).push(row);
+      if (row) { result.push(row); bandsWithRow.add(band.key); }
     }
   }
 
@@ -3032,17 +3010,16 @@ function rowsFromCells(cells, bands, bounds, rowYTolerance) {
   //   OCRとして扱うため、複数行の内容が1つのDESCRIPTIONにまとめて認識される可能性がある。
   //   その場合は目視確認・手直しが必要になる。
   for (const band of bands) {
-    if (bandOutput.get(band.key).length) continue;
+    if (bandsWithRow.has(band.key)) continue;
     const descBBox = { x0: bounds.boundSizeDesc, x1: bounds.boundDescQty, y0: band.y0, y1: band.y1 };
     const sizeBBox = { x0: bounds.boundLeft, x1: bounds.boundSizeDesc, y0: band.y0, y1: band.y1 };
     const qtyBBox = { x0: bounds.boundDescQty, x1: bounds.boundQtyEnd, y0: band.y0, y1: band.y1 };
     const boltType = band.key === 'BOLT&NUT' ? deriveBoltType(band.label) : '';
-    bandOutput.get(band.key).push(reclassifyBoltGasket({
+    result.push(reclassifyBoltGasket({
       item: band.key, size: '', description: '', tag: '', qty: '', boltType,
       descBBox, sizeBBox, qtyBBox, readMethod: 'テキスト', isPlaceholder: true
     }));
   }
-  for (const band of bands) result.push(...bandOutput.get(band.key));
   return result;
 }
 
@@ -3051,7 +3028,7 @@ function rowsFromCells(cells, bands, bounds, rowYTolerance) {
 function buildMaterialRowFromCluster(cluster, bounds, band) {
   const sizeParts = [];
   const descParts = [];
-  const qtyParts = [];
+  let qtyParts = [];
   for (const c of cluster) {
     if (c.xc < bounds.boundSizeDesc) {
       sizeParts.push([c.x0, c.text]);
@@ -3060,6 +3037,20 @@ function buildMaterialRowFromCluster(cluster, bounds, band) {
     } else {
       qtyParts.push([c.x0, c.text]);
     }
+  }
+  // v36で追加：「BW」「SW」（配管の接続方法＝突合せ溶接／差込み溶接）や「t1.5」
+  // （ガスケットの厚み）は、実際にはDESCRIPTION（材質）欄の続きとして印字されている
+  // にもかかわらず、印字位置がQTY欄との境界(boundDescQty)ぎりぎり・境界の右側に
+  // かかることがあり、座標だけで列判定すると数量(QTY)欄に誤って入ってしまっていた
+  // （例：QTY欄が「BW 2」「t1.5 3」のようになる不具合）。
+  // 数量は本来「数字（小数点を含んでもよい）のみ」のはずなので、QTY欄に振り分けられた
+  // セルのうち数字だけで構成されていないもの（BW・SW・t1.5等）は、座標判定の結果を
+  // 内容で補正し、DESCRIPTION欄側へ回す。
+  const isPureQtyValue = t => /^[0-9]+(?:\.[0-9]+)?$/.test(normalizeWidthAndSpaces(t || ''));
+  const misclassifiedIntoQty = qtyParts.filter(p => !isPureQtyValue(p[1]));
+  if (misclassifiedIntoQty.length) {
+    descParts.push(...misclassifiedIntoQty);
+    qtyParts = qtyParts.filter(p => isPureQtyValue(p[1]));
   }
   // 各列内のセルはX座標順に並べてから連結する（PDF内部の格納順が見た目の並び順と
   // 限らないため、常にX座標でソートしてから連結することで語順の入れ替わりを防ぐ）。
@@ -3353,9 +3344,19 @@ function cleanOcrSize(rawText) {
 // 品目を問わずこの確認用一覧への計上自体をやめる（v30時点ではPIPE・エルボのみ
 // 対象外にしていたが、全品目に拡大）。行を出力から除外する処理自体は従来通り行う。
 function dropEmptyPlaceholderRows(rows, droppedOut) {
+  // v35で修正：以前は「r.isPlaceholder（品目枠に1件もデータが無かった空行）」かつ
+  // 「size/description/qtyがすべて空文字（trim後）」の場合だけを除外していた。
+  // しかし実際には、品目ラベルの帯位置がわずかにズレている等の理由で、罫線のかすれや
+  // 隣の枠の記号がノイズとして1文字だけ拾われてしまうことがあり、この場合は
+  // isPlaceholderが立たない「実データ由来の行」として生成されてしまうため、
+  // 上記の条件では除外できずにサイズ・材質・数量が実質空欄のまま出力に残っていた
+  // （PIPE・ELBOW・TEE等、実際には未使用の品目が空行として大量に出る不具合）。
+  // isPlaceholderかどうかを問わず、size/description/qtyのいずれにも英数字・かな漢字
+  // といった意味のある文字が1文字も含まれていなければ「記載なし」とみなして除外する
+  // （hasMeaningfulCharsはOCR側の空判定と同じ考え方の関数を流用）。
   return rows.filter(r => {
-    const isEmptyPlaceholder = r.isPlaceholder && !String(r.size || '').trim() && !String(r.description || '').trim() && !String(r.qty || '').trim();
-    return !isEmptyPlaceholder;
+    const isEmpty = !hasMeaningfulChars(r.size) && !hasMeaningfulChars(r.description) && !hasMeaningfulChars(r.qty);
+    return !isEmpty;
   });
 }
 
@@ -3554,15 +3555,6 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
   // 品目一覧のどれとも一致しなかった」行は、生のOCR結果をそのまま採用すべきで、
   // 別の品目で上書きしてはいけない。そこで引き継ぎ対象をitemTextEmpty===trueの
   // 行だけに限定する。
-  // v35で追加：最近傍探索の距離に上限を設けた。表の下端に近い行ほど「近くに
-  // 確定済みの品目が無い」状況になりやすく、上限が無いとページ内の離れた場所
-  // （等角図中の寸法表記「V.45°」等がELBOWの品目名として誤マッチしたもの等）を
-  // 拾ってしまい、本来は別の品目（XVの3件目等）であるはずの行が全く無関係な
-  // 品目名で上書きされる事故が起きていた。同じ結合セル内であれば通常は数行以内に
-  // 確定済みの品目があるはずなので、それより離れている場合は「引き継がず品目未検出
-  // のまま」にする（誤った品目名で埋めるより、未検出として残し目視で気づけるように
-  // する方が安全なため）。
-  const ITEM_INHERIT_MAX_DIST = 3; // 行。これより離れた確定済み品目は引き継ぎ対象にしない
   const knownIdx = []; // 既知の品目名に実際にマッチした行のインデックス一覧
   rows.forEach((row, idx) => {
     if (row.itemMatched) knownIdx.push(idx);
@@ -3571,16 +3563,11 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
     rows.forEach((row, idx) => {
       if (row.itemMatched) return; // 既に既知の品目にマッチしている行はそのまま
       if (!row.itemTextEmpty) return; // 何かしら文字が読み取れている行は、上書きせずそのまま採用する
-      let nearest = null;
-      let nearestDist = Infinity;
+      let nearest = knownIdx[0];
+      let nearestDist = Math.abs(knownIdx[0] - idx);
       for (const ki of knownIdx) {
         const d = Math.abs(ki - idx);
         if (d < nearestDist) { nearest = ki; nearestDist = d; }
-      }
-      if (nearest === null || nearestDist > ITEM_INHERIT_MAX_DIST) {
-        row.item = '(品目未検出)'; // 近くに確定済み品目が無い＝誤った品目で埋めるリスクの方が高いので未検出のままにする
-        row.itemInherited = false;
-        return;
       }
       row.item = rows[nearest].item;
       row.itemInherited = true; // プレビューで「結合セルから引き継いだ値」と分かるように印を付ける
@@ -4090,15 +4077,11 @@ function buildOutputRows() {
 // autoFilled:false の列（A・D・N・O・Q・R・T・U・V・W）はPDFから自動判定できないため、
 // 値は空欄のまま、列の位置だけ揃えて出力する。
 //
-// 材質区分の判定関数：DESCRIPTION（材質）列の文字列に「SUS」が含まれていれば'SUS'、
+// 材質区分の判定関数：ITEM列の文字列に「SUS」が含まれていれば'SUS'、
 // 「PVC」が含まれていれば'PVC'、どちらも含まれなければ'CS'を返す。
-// （DESCRIPTIONが未読取・空欄の場合は判定せず空欄のままにする）
-// v38で修正：以前はITEM列（PIPE/90°ELBOW/TEE等の品目名）を判定対象にしていたが、
-// 品目名自体には「SUS」「PVC」の文字列が含まれることが無いため、材質がSUSであっても
-// 常に判定漏れで'CS'になってしまっていた（材質の情報はDESCRIPTION列＝例：
-// 「SUS304TP-A 3.0t」の方に入っている）。判定対象をDESCRIPTIONに修正する。
-function classifyMaterialClass(descriptionText) {
-  const t = String(descriptionText || '').trim();
+// （ITEM自体が未読取・空欄の場合は判定せず空欄のままにする）
+function classifyMaterialClass(itemText) {
+  const t = String(itemText || '').trim();
   if (!t) return '';
   if (/SUS/i.test(t)) return 'SUS';
   if (/PVC/i.test(t)) return 'PVC';
@@ -4106,10 +4089,10 @@ function classifyMaterialClass(descriptionText) {
 }
 const COLUMN_DEFS = [
   { col: 'A', header: '計算式用',       autoFilled: false },
-  // v16で追加：断熱仕様の左に、DESCRIPTION（材質）列の文字列からSUS/PVC/CSを自動判定して入れる列。
+  // v16で追加：断熱仕様の左に、ITEM列の文字列からSUS/PVC/CSを自動判定して入れる列。
   // テンプレート本来のB列以降（断熱仕様〜BM）は、この列の追加に合わせて
   // すべて1列ずつ右にずれている（実際のxlsxテンプレート側にも同じ列を挿入済み）。
-  { col: 'B', header: '材質区分',       autoFilled: true,  get: r => classifyMaterialClass(r.description) },
+  { col: 'B', header: '材質区分',       autoFilled: true,  get: r => classifyMaterialClass(r.item) },
   { col: 'C', header: '断熱仕様',       autoFilled: true,  get: r => r.insulationSpec },
   { col: 'D', header: '塗装仕様',       autoFilled: false },
   { col: 'E', header: 'JOBNo',         autoFilled: true,  get: r => r.jobNo },
@@ -4681,6 +4664,9 @@ const DIA_INCH_ITEM_FACTOR = {
   'ハーフユニオン': 2,
   NIPPLE: 0,
   'BOLT&NUT': 0,
+  // 種別判定後の表示名（boltDisplayItem）もここで引かれるため、同じく0倍で登録する
+  'MACHINE BOLT&NUT': 0,
+  'STUD BOLT&NUT': 0,
   VALVE: 0,
   'BF加工品': 0,
   XV: 0,
@@ -4690,10 +4676,26 @@ const DIA_INCH_ITEM_FACTOR = {
   'N2減圧弁': 0,
   '窒素ボンベ': 0,
   PLUG: 0,
-  'PRESSURE GAUGE': 0
+  'PRESSURE GAUGE': 0,
+  // LG・TG・VD：溶接を伴わない/対象外のため0倍
+  LG: 0,
+  TG: 0,
+  VD: 0
 };
 function diaInchFactor(item) {
-  return DIA_INCH_ITEM_FACTOR[item] !== undefined ? DIA_INCH_ITEM_FACTOR[item] : 1;
+  if (DIA_INCH_ITEM_FACTOR[item] !== undefined) return DIA_INCH_ITEM_FACTOR[item];
+  // 大文字小文字・空白（半角/全角）の違いだけの表記ゆれ（例：「lg」「L G」）も係数表に一致させる。
+  const norm = t => String(t == null ? '' : t).replace(/[\s\u3000]/g, '').toUpperCase();
+  const normItem = norm(item);
+  for (const k of Object.keys(DIA_INCH_ITEM_FACTOR)) {
+    if (norm(k) === normItem) return DIA_INCH_ITEM_FACTOR[k];
+  }
+  // 「90° ショート」「45° ショート」など、図面ごとに表記が異なる90°/45°系のエルボは、
+  // 品目名が「90°」「45°」で始まるかどうか（スペースの有無・全角/半角を問わない）で判定し、
+  // 通常の90°/45°エルボと同じ2倍とする。
+  const compact = String(item == null ? '' : item).replace(/[\s\u3000]/g, '');
+  if (/^(90|45|９０|４５)[°゜º˚]/.test(compact)) return 2;
+  return 1;
 }
 
 // パイプ1mあたりの重量(kg/m)を算出する。
