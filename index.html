@@ -90,6 +90,25 @@
   .badge.warn{ background:#FBDCDC; color:#A0153A; }
   tbody tr.spec-warn-row td{ background:#FFF3F3; }
   td.editable-titleblock{ cursor:text; }
+  /* v36で追加：プレビュー表（.mat-table）専用のスタイル。table-layout:fixedと<colgroup>の
+     width指定を組み合わせ、列幅をドラッグで手動変更できるようにする。折り返しの代わりに
+     省略記号(…)で切り、必要な列だけ広げて全文を確認できるようにする（他の一覧表には影響しない）。*/
+  table.mat-table{ width:auto; table-layout:fixed; }
+  table.mat-table th, table.mat-table td{
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  /* 編集中のセルだけは全文が見えるよう、その場で折り返し表示に戻す */
+  table.mat-table td.editable-titleblock:focus,
+  table.mat-table td.editable-material:focus{
+    white-space:normal; overflow:visible; text-overflow:clip; position:relative; z-index:5; background:#fff;
+  }
+  table.mat-table .col-resizer{
+    position:absolute; top:0; right:0; width:6px; height:100%;
+    cursor:col-resize; user-select:none; z-index:3;
+  }
+  table.mat-table .col-resizer:hover,
+  table.mat-table .col-resizer.resizing{ background:rgba(255,255,255,0.35); }
+  table.mat-table th .th-label{ display:inline-block; overflow:hidden; text-overflow:ellipsis; max-width:100%; vertical-align:middle; }
   td.editable-titleblock:hover{ background:#F0F6FF; outline:1px dashed #8FB3E8; outline-offset:-1px; }
   td.editable-titleblock:focus{ background:#FFFFFF; outline:2px solid #2f6fed; outline-offset:-2px; }
   select.spec-fix-select{
@@ -110,6 +129,9 @@
   /* v9で追加：デメリット対策②。信頼度が低いOCRセルを含む行は、通常のOCR行（紫）より
      さらに強く目立たせるため、左端に太い赤ボーダーを付ける。 */
   tbody tr.low-confidence-row td:first-child{ border-left:4px solid #D9534F; }
+  /* v40で追加：ITEM欄が読み取れず近くの行から品目名を引き継いだ行の目印（左端に紫の帯）。
+     背景・枠線自体はK列セルにoutlineで個別に付くため、ここでは行の左端の帯だけ追加する。*/
+  tbody tr.item-inherited-row td:first-child{ border-left:4px solid #6A3AA0; }
   /* v12で追加：「要確認」欄のリンクから該当行にジャンプした時、一瞬だけ黄色くフラッシュさせて
      「ここです」と分かるようにする。 */
   @keyframes rowFlash{ 0%{ background:#FFF3B0; } 100%{ background:transparent; } }
@@ -135,6 +157,25 @@
 </style>
 </head>
 <body>
+
+<div id="myDictPanel" style="display:block; position:fixed; top:0; right:0; height:100vh; width:400px; max-width:92vw; background:#fff; z-index:9999; box-shadow:-6px 0 24px rgba(20,30,40,.18); overflow-y:auto; padding:18px 20px; transform:translateX(100%); transition:transform .2s ease;">
+  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; gap:8px;">
+    <h2 style="margin:0; font-size:15px;">マイ辞書</h2>
+    <button type="button" id="btnCloseMyDict" class="ghost" style="font-size:12px; padding:4px 10px;">閉じる ✕</button>
+  </div>
+  <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px;">
+    <button type="button" id="btnExportMyDict" class="ghost" style="font-size:12px; padding:4px 10px;">書き出し</button>
+    <button type="button" id="btnImportMyDict" class="ghost" style="font-size:12px; padding:4px 10px;">読み込み</button>
+    <input type="file" id="myDictFileInput" accept=".json" style="display:none;">
+    <button type="button" id="btnClearMyDict" class="ghost" style="font-size:12px; padding:4px 10px;">クリア</button>
+  </div>
+  <div style="font-size:12px; color:#5a6570; margin-bottom:6px;">
+    プレビュー表のサイズ・材質・数量欄をクリックして修正すると、ここに品目ごとに記録されます。
+    「誤読」「修正後」はこのパネル内でも直接クリックして書き換えられます。
+  </div>
+  <div id="myDictStatus" style="font-size:12px; color:#8a95a0; margin-bottom:10px;"></div>
+  <div id="myDictBody"></div>
+</div>
 
 <style>
   #licenseGateOverlay{
@@ -256,7 +297,9 @@
       <button type="button" id="btnImportDescVocab" class="ghost" style="font-size:12px; padding:6px 12px;">辞書を読み込み</button>
       <input type="file" id="descVocabFileInput" accept=".json" style="display:none;">
       <button type="button" id="btnClearDescVocab" class="ghost" style="font-size:12px; padding:6px 12px;">辞書をクリア</button>
-      <span id="descVocabStatus" style="font-size:12px; color:#8a95a0;"></span>    </div>
+      <span id="descVocabStatus" style="font-size:12px; color:#8a95a0;"></span>
+      <button type="button" id="btnOpenMyDict" class="ghost" style="font-size:12px; padding:6px 12px;">マイ辞書を表示</button>
+    </div>
     <div class="row" style="width:100%;">
       <div id="dropZone">
         フォルダごとドラッグ＆ドロップ（サブフォルダ内のPDFも自動で拾います）、またはクリックしてPDFファイルを選択（複数可）
@@ -464,10 +507,18 @@ previewWrap.addEventListener('click', (ev) => {
   setTimeout(() => targetEl.classList.remove('row-flash'), 2200);
 });
 
+// v37で追加：直接編集した内容をマイ辞書（自動学習）に保存するかどうかを、その場で
+// 「はい／いいえ」で確認できるようにする。「いいえ」を選んだ場合も、今回編集したセルの
+// 値そのものは反映する（辞書への学習だけをしない）。
+function confirmSaveToDict(fromText, toText) {
+  return window.confirm(`この修正をマイ辞書に保存しますか？\n「${fromText}」→「${toText}」\n\n「はい」：次回から同じ誤りを自動修正します\n「いいえ」：今回のセルだけ修正し、辞書には保存しません`);
+}
+
 // v27で追加：LINE No./図面番号/適用法規セル（.editable-titleblock）を直接編集した時の処理。
 // これらはページ単位の値（同じページの全行に同じ値が入る）なので、rowIdからpageIdxを
 // 求め、pageData側の該当ページ（該当ページの全行）へまとめて反映する。
 // 編集内容はタイトルブロック専用の補正辞書に記録し、次回以降の同じ誤読を学習する。
+// v37で追加：辞書へ保存するかどうかはconfirmSaveToDict()で都度確認する。
 previewWrap.addEventListener('blur', (ev) => {
   const td = ev.target.closest && ev.target.closest('.editable-titleblock');
   if (!td) return;
@@ -486,7 +537,9 @@ previewWrap.addEventListener('blur', (ev) => {
     const oldCode = e.lawCode || 'N';
     const newCode = lawToCode(newDisplayText);
     if (newCode !== oldCode) {
-      recordTitleBlockCorrection('lawCode', oldCode, newCode);
+      if (confirmSaveToDict(lawToText(oldCode), lawToText(newCode))) {
+        recordTitleBlockCorrection('lawCode', oldCode, newCode);
+      }
       e.lawCode = newCode;
       renderPreview();
     } else {
@@ -496,14 +549,93 @@ previewWrap.addEventListener('blur', (ev) => {
     return;
   }
 
-  const oldValue = e[field] || '';
+  // v35で追加：配管クラス(I)・ガスケットクラス(J)はLINE No.からの自動算出値を
+  // 上書きフィールド(pipeClassOverride/gasketClassOverride)に保持する方式のため、
+  // 「変更されたか」の判定は保存済みの生値(e[field])ではなく、実際にセルへ表示していた
+  // 値(data-current-value)と比較する。drawingNo/lineNoは従来通りe[field]と一致するため、
+  // この変更による挙動差は無い。
+  const oldValue = td.dataset.currentValue || '';
   if (newDisplayText === oldValue) return; // 変更なし
   if (!newDisplayText) return; // 空にする編集は誤操作の可能性が高いため無視する（renderPreviewで元に戻す）
 
-  recordTitleBlockCorrection(field, oldValue, newDisplayText);
+  if (confirmSaveToDict(oldValue, newDisplayText)) {
+    recordTitleBlockCorrection(field, oldValue, newDisplayText);
+  }
   e[field] = newDisplayText;
+  // v35で追加：LINE No.自体を編集し直した場合は、配管クラス／ガスケットクラスの上書きを
+  // 破棄し、新しいLINE No.から自動算出し直す（＝縦方向＝同一図面の全行への反映は
+  // 従来通り自動でよいが、古い手修正値を残さない）。
+  if (field === 'lineNo') {
+    delete e.pipeClassOverride;
+    delete e.gasketClassOverride;
+  }
   renderPreview();
 }, true); // blurはバブリングしないため、captureフェーズで拾う
+
+// v34で追加：サイズ(L)・材質(M)・数量(N)セル（.editable-material）を直接編集した時の処理。
+// v37で追加：辞書へ保存するかどうかはconfirmSaveToDict()で都度確認する（「いいえ」の場合は
+// このセルの値だけ書き換え、辞書には学習させない）。
+// v35で追加：ITEM(K)もこのハンドラで拾う。ITEMだけはdata-itemが常に空文字（＝品目名で
+// スコープしない共通辞書）になるようレンダリング側で調整済みのため、このハンドラ自体の
+// 変更は不要（recordOcrCellCorrection('item', '', ...)として保存されるだけ）。
+previewWrap.addEventListener('blur', (ev) => {
+  const td = ev.target.closest && ev.target.closest('.editable-material');
+  if (!td) return;
+  const rowId = td.dataset.rowId;
+  const field = td.dataset.field; // 'item' | 'size' | 'description' | 'qty'
+  const item = td.dataset.item || '';
+  if (!rowId || !field) return;
+  const [pageIdxStr, matIdxStr] = String(rowId).split(':');
+  const e = pageData[parseInt(pageIdxStr, 10)];
+  const m = e && e.materials && e.materials[parseInt(matIdxStr, 10)];
+  if (!m) return;
+
+  const newText = td.textContent.trim();
+  const oldValue = String(m[field] || '');
+  if (newText === oldValue) { renderPreview(); return; } // 変更なし（表示だけ元に戻す）
+  if (!newText) { renderPreview(); return; } // 空にする編集は誤操作の可能性が高いため無視する
+
+  if (confirmSaveToDict(oldValue, newText)) {
+    recordOcrCellCorrection(field, item, oldValue, newText);
+  }
+  m[field] = newText;
+  // 直接編集して確定させた値なので、それまで辞書由来の自動修正マーク（赤字）が
+  // 付いていた場合はいったんクリアする（このタイミングでは新しい訂正がまだ
+  // usageCountに反映されていないため、赤字は次に同じ誤読が出た時から表示される）。
+  if (m.__dictFix) delete m.__dictFix[field];
+  renderPreview();
+}, true); // blurはバブリングしないため、captureフェーズで拾う
+
+// v36で追加：プレビュー表の列幅をヘッダー右端のハンドルをドラッグして手動変更できるようにする。
+// 幅はpreviewColWidths（メモリ上）に保存し、以降のrenderPreview()の再描画にも引き継がれる
+// （ページの再読み込みでは初期値に戻る）。ドラッグ中は再描画せず<col>要素の幅だけをその場で
+// 直接書き換えることで、カクつきなく滑らかに動かせるようにしている。
+let colResizeState = null;
+previewWrap.addEventListener('mousedown', (ev) => {
+  const handle = ev.target.closest && ev.target.closest('.col-resizer');
+  if (!handle) return;
+  ev.preventDefault();
+  const col = handle.dataset.col;
+  const th = handle.closest('th');
+  if (!th) return;
+  colResizeState = { col, startX: ev.clientX, startWidth: th.getBoundingClientRect().width };
+  handle.classList.add('resizing');
+  document.addEventListener('mousemove', onColResizeMove);
+  document.addEventListener('mouseup', onColResizeUp);
+});
+function onColResizeMove(ev) {
+  if (!colResizeState) return;
+  const newWidth = Math.max(30, Math.round(colResizeState.startWidth + (ev.clientX - colResizeState.startX)));
+  previewColWidths[colResizeState.col] = newWidth;
+  const colEl = previewWrap.querySelector(`col[data-col="${colResizeState.col}"]`);
+  if (colEl) colEl.style.width = newWidth + 'px';
+}
+function onColResizeUp() {
+  colResizeState = null;
+  document.querySelectorAll('.col-resizer.resizing').forEach(el => el.classList.remove('resizing'));
+  document.removeEventListener('mousemove', onColResizeMove);
+  document.removeEventListener('mouseup', onColResizeUp);
+}
 
 let loadedFiles = []; // [{ name, bytes(ArrayBuffer) }, ...]
 let pageData = [];
@@ -1298,12 +1430,18 @@ async function runAnalysis(appendMode) {
     const ocrRowCount = pageData.reduce((sum, e) => sum + (e.materials || []).filter(m => String(m.readMethod || '').startsWith('OCR')).length, 0);
     // v9で追加：デメリット対策②。信頼度が低かったセルの件数も別途集計し、より強く確認を促す。
     const lowConfCellCount = pageData.reduce((sum, e) => sum + (e.materials || []).reduce((s2, m) => s2 + (m.lowConfidenceFields ? m.lowConfidenceFields.length : 0), 0), 0);
+    // v40で追加：ITEM欄がその行自体からは読み取れず、近くの行から品目名を借用（引き継ぎ）した
+    // 行数を集計する。PIPE・TEE等、品目ラベルが結合セル（複数行にまたがる1つの表記）の
+    // テンプレートでこの引き継ぎが発生しやすく、引き継ぎ先を間違えると本来の品目名が
+    // 別の品目名に静かに置き換わってしまう。件数が多い場合は要注意。
+    const itemInheritedCount = pageData.reduce((sum, e) => sum + (e.materials || []).filter(m => m.itemInherited).length, 0);
     const ocrNote = ocrRowCount > 0 ? `／OCR補完 ${ocrRowCount}行（紫色の行。内容を目視確認してください）` : '';
     const lowConfNote = lowConfCellCount > 0 ? `／読み取り信頼度が低いセル ${lowConfCellCount}件（赤枠。特に優先して確認してください）` : '';
+    const itemInheritedNote = itemInheritedCount > 0 ? `／品目名を近くの行から引き継いだセル ${itemInheritedCount}件（ITEM列が紫破線枠。図面と見比べて品目名をご確認ください）` : '';
     const cancelNote = cancelled ? `（ここまでに読み取れた${totalPagesDone}ページ分をプレビューに反映しています）` : '';
     statusText.textContent = readFailCount > 0
-      ? `${modeLabel} 今回${files.length}ファイル分・合計${pageData.length}ページ（うち今回読み取れなかったもの ${readFailCount}件。詳細はプレビュー欄をご確認ください）${cancelNote}${ocrNote}${lowConfNote}`
-      : `${modeLabel} 今回${files.length}ファイル分・合計${pageData.length}ページ${cancelNote}${ocrNote}${lowConfNote}`;
+      ? `${modeLabel} 今回${files.length}ファイル分・合計${pageData.length}ページ（うち今回読み取れなかったもの ${readFailCount}件。詳細はプレビュー欄をご確認ください）${cancelNote}${ocrNote}${lowConfNote}${itemInheritedNote}`
+      : `${modeLabel} 今回${files.length}ファイル分・合計${pageData.length}ページ${cancelNote}${ocrNote}${lowConfNote}${itemInheritedNote}`;
     renderPreview();
   } catch (err) {
     console.error('解析処理に失敗しました', err);
@@ -1791,6 +1929,146 @@ function getConfirmedTitleBlockCorrection(type, wrongText) {
   return best ? best.to : null;
 }
 
+// ============================================================
+// OCRセル修正辞書（プレビュー表の直接編集による学習・即時自動反映）
+// ============================================================
+// ご要望：「プレビュー画面から直接入力で修正し、その内容を辞書に保管する。
+// 　　　　　修正を行った場合は同様のものは自動で反映させ、反映させたものは
+// 　　　　　赤色で表示させる。マイ辞書で自動修正したものは青で表示して注意を促す。」
+// 　　　　　（追加要望）「マイ辞書はこのソフトに保存できるようにして」
+// 他の辞書（SPEC_CORRECTIONS等）は「同じ訂正がN回選ばれたら自動反映」という
+// 閾値方式だが、ここは直接入力での訂正なのでユーザーの意図がその場で明確なため、
+// 1回の訂正で即座に辞書へ保存し、次回（同じ行の再描画も含む）から自動反映する。
+// 品目(ITEM)ごとに辞書を分ける（同じ誤読文字列でも品目によって正しい修正先が
+// 異なり得るため。DESC_VOCABと同じ考え方）。対象欄は サイズ(size)／材質(description)／
+// 数量(qty) の3つ。
+//
+// EMBEDDED_DESC_VOCABと同じ考え方で、「このソフト（HTMLファイル）自体に辞書を
+// 保存できるように」という要望に対応する：
+// 　組み込み辞書：EMBEDDED_OCR_CELL_CORRECTIONS（このファイルに定数として同梱。
+// 　　　　　　　　ファイルを更新しない限り不変・全PC共通。配布するだけで使える）
+// 　ローカル辞書：localStorage（PCごとに、プレビューでの直接修正がここに積み上がる）
+// 実際に使う際（自動反映の判定）は両方を合算した内容を使うが、書き込みは必ず
+// ローカル辞書側にのみ行い、組み込み辞書（＝配布ファイル本体）は実行時に一切変更しない。
+// マイ辞書パネルの「辞書を書き出し」で出力したJSONの中身を、このEMBEDDED_OCR_CELL_CORRECTIONS
+// にそのまま貼り付ければ、次に配布するファイルに焼き込める（＝ソフト自体に保存）。
+const OCR_CELL_CORRECTIONS_STORAGE_KEY = 'materialAggTool.ocrCellCorrections.v1';
+const EMBEDDED_OCR_CELL_CORRECTIONS = {};
+
+function loadOcrCellCorrectionsLocal() {
+  try {
+    const raw = localStorage.getItem(OCR_CELL_CORRECTIONS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch (e) {
+    return {}; // 破損している場合は空の辞書として扱う（読み込み失敗で機能全体を止めない）
+  }
+}
+// 組み込み辞書＋ローカル辞書を合算した「実際に使う」辞書を返す（読み取り専用）。
+// キーが重複する場合はローカル辞書（このPCでの新しい修正）を優先する。
+function loadOcrCellCorrectionsCombined() {
+  return { ...EMBEDDED_OCR_CELL_CORRECTIONS, ...loadOcrCellCorrectionsLocal() };
+}
+function saveOcrCellCorrectionsLocal(data) {
+  try { localStorage.setItem(OCR_CELL_CORRECTIONS_STORAGE_KEY, JSON.stringify(data)); }
+  catch (e) { console.error('OCRセル修正辞書の保存に失敗しました', e); }
+}
+function ocrCorrectionKey(field, item, wrongText) {
+  return `${field}::${item || ''}::${wrongText}`;
+}
+// プレビュー表でセル（サイズ／材質／数量）を直接編集して訂正した時に呼ぶ。
+// 他の辞書と違い、待たずにその場でローカル辞書へ保存する（ご要望の「同様のものは自動で反映」に対応）。
+// 組み込み辞書（EMBEDDED_OCR_CELL_CORRECTIONS）はここでは一切書き換えない。
+function recordOcrCellCorrection(field, item, wrongText, correctedTo) {
+  if (!field || !wrongText || !correctedTo || wrongText === correctedTo) return;
+  const data = loadOcrCellCorrectionsLocal();
+  const key = ocrCorrectionKey(field, item, wrongText);
+  const prev = data[key];
+  data[key] = {
+    field, item: item || '', wrong: wrongText, to: correctedTo,
+    usageCount: prev ? (prev.usageCount || 0) : 0,
+    createdAt: prev ? prev.createdAt : Date.now(),
+    updatedAt: Date.now()
+  };
+  saveOcrCellCorrectionsLocal(data);
+}
+function getOcrCellCorrection(field, item, wrongText) {
+  if (!wrongText) return null;
+  return loadOcrCellCorrectionsCombined()[ocrCorrectionKey(field, item, wrongText)] || null;
+}
+// usageCount（自動反映された回数）は組み込み・ローカルどちらの由来でも、実績として
+// 必ずローカル辞書側に記録する（組み込み辞書自体は不変のため）。組み込み由来の
+// エントリを初めて使った場合は、ここでローカル辞書側にコピーしてから回数を積む。
+function bumpOcrCellCorrectionUsage(field, item, wrongText) {
+  const data = loadOcrCellCorrectionsLocal();
+  const key = ocrCorrectionKey(field, item, wrongText);
+  if (!data[key]) {
+    const combined = loadOcrCellCorrectionsCombined()[key];
+    if (!combined) return;
+    data[key] = { ...combined, usageCount: 0 };
+  }
+  data[key].usageCount = (data[key].usageCount || 0) + 1;
+  saveOcrCellCorrectionsLocal(data);
+}
+// 削除できるのはローカル辞書に積まれた分のみ（組み込み辞書はファイル自体を
+// 更新しない限り消せない。DESC_VOCABの「辞書をクリア」と同じ考え方）。
+function deleteOcrCellCorrection(field, item, wrongText) {
+  const data = loadOcrCellCorrectionsLocal();
+  delete data[ocrCorrectionKey(field, item, wrongText)];
+  saveOcrCellCorrectionsLocal(data);
+}
+function clearOcrCellCorrectionsLocal() {
+  try { localStorage.removeItem(OCR_CELL_CORRECTIONS_STORAGE_KEY); } catch (e) { /* noop */ }
+}
+// この品目の1行(m)について、サイズ／材質／数量の各欄に辞書該当があれば自動で
+// 書き換える。一度適用した内容はm.__dictFixに記録し（pageData上のmは再描画をまたいで
+// 保持される）、再描画のたびに二重にusageCountを加算しないようにする。
+// セル側で赤色表示するための情報（どの欄が・何から何に変わったか）を返す。
+function applyOcrCellCorrections(m, item) {
+  m.__dictFix = m.__dictFix || {};
+  const dictFixedInfo = [];
+  ['size', 'description', 'qty'].forEach(field => {
+    const current = String(m[field] || '');
+    if (!current) return;
+    const already = m.__dictFix[field];
+    if (already && already.to === current) {
+      // 前回の描画で既に適用済み（値はそのまま）→ usageCountは加算せず表示のみ継続
+      dictFixedInfo.push({ field, from: already.from, to: already.to });
+      return;
+    }
+    const entry = getOcrCellCorrection(field, item, current);
+    if (entry && entry.to !== current) {
+      m[field] = entry.to;
+      m.__dictFix[field] = { from: current, to: entry.to };
+      dictFixedInfo.push({ field, from: current, to: entry.to });
+      bumpOcrCellCorrectionUsage(field, item, current);
+    }
+  });
+  return dictFixedInfo;
+}
+
+// v35で追加：ITEM欄専用のマイ辞書適用。サイズ／材質／数量は「品目(item)ごと」に辞書を
+// 分けているが、ITEM欄自体を訂正する辞書はその品目名を持たない（訂正前の品目名が
+// キーになるため）ので、スコープ無し（第2引数は常に''）の共通辞書として扱う。
+// 戻り値の形はapplyOcrCellCorrectionsの1件分と同じ（{field:'item', from, to}）にして、
+// dictFixedInfoにそのまま混在させられるようにする。
+function applyOcrCellCorrectionForItem(m) {
+  m.__dictFix = m.__dictFix || {};
+  const current = String(m.item || '');
+  if (!current) return null;
+  const already = m.__dictFix.item;
+  if (already && already.to === current) {
+    return { field: 'item', from: already.from, to: already.to };
+  }
+  const entry = getOcrCellCorrection('item', '', current);
+  if (entry && entry.to !== current) {
+    m.item = entry.to;
+    m.__dictFix.item = { from: current, to: entry.to };
+    bumpOcrCellCorrectionUsage('item', '', current);
+    return { field: 'item', from: current, to: entry.to };
+  }
+  return null;
+}
+
 async function analyzePage(pdf, pageNum) {
   currentPageOcrIssues = []; // ページごとにリセット
   const page = await pdf.getPage(pageNum);
@@ -1901,7 +2179,22 @@ async function analyzePage(pdf, pageNum) {
         jobNoFromDrawingNo = ocrResult.jobNoFromDrawingNo;
       }
       if (ocrResult.lineNo) { lineNo = ocrResult.lineNo; }
-      if (ocrResult.lawCode) { lawCode = ocrResult.lawCode; }
+      if (ocrResult.lawCode) {
+        lawCode = ocrResult.lawCode;
+      } else {
+        // v39で追加：適用法規欄はOCR ON時、既定では「材料表より左側のページ全体」を
+        // まるごとOCRしてキーワード検索しているが、図面によっては法規名の文字列が
+        // （DRAWING No./LINE No.とは違い）AutoCAD上でも通常のテキストとして埋め込まれて
+        // おり、pdf.jsのテキスト抽出で問題なく取得できるケースがある（実際にこの図面でも
+        // 「高圧ガス保安法」「大臣認定適用」はテキストとして取得できていた）。
+        // それにもかかわらずOCR側の枠が図面テンプレートに合わず何も検出できなかった場合、
+        // 従来は「適用法規なし('N')」のまま確定してしまい、欄が空欄で出力される不具合が
+        // あった。OCR ON時にテキスト側へフォールバックする方針自体は変えず（OCR結果を
+        // 常に最優先する）、OCRで何も検出できなかった場合に限り、保険としてテキスト層からの
+        // 判定も試す。
+        const textLawCode = lawToCode(searchText);
+        if (textLawCode !== 'N') { lawCode = textLawCode; }
+      }
     } catch (e) {
       logOcrIssue('タイトル欄OCR(DRAWING No./LINE No.)', e);
     }
@@ -1941,6 +2234,28 @@ async function analyzePage(pdf, pageNum) {
   if (isOcrEnabled()) {
     try {
       materials = await scanQtyColumnForMissingRows(page, textContent, viewport);
+      // デバッグ用：PIPE・TEE等、特定の品目だけが出力から漏れる／別の品目名に化ける
+      // 不具合の調査用に、このページでOCRが実際に検出した各行のITEM欄の生読み取り結果・
+      // 辞書一致の有無・引き継ぎ（結合セル救済）の有無を、ブラウザのDevToolsコンソールに
+      // 一覧表示する（画面表示には出さない。切り分け用の一時的なログ）。
+      if (materials.length) {
+        console.groupCollapsed(`[材料表OCRデバッグ] page ${pageNum} / DRAWING No.(暫定) ${drawingNo || '(未検出)'}`);
+        console.table(materials.map(m => ({
+          品目_確定: m.item,
+          品目取得元: String(m.readMethod || '').includes('テキスト抽出') ? 'テキスト' : 'OCR画像認識',
+          ITEM欄_生OCR結果: m.itemRawOcrText,
+          SIZE_DESC_生OCR結果: m.rawSizeDescOcrText,
+          QTY_Y座標: m.debugQtyY != null ? Math.round(m.debugQtyY * 10) / 10 : '',
+          切り出し範囲_上端: m.debugBandY0 != null ? Math.round(m.debugBandY0 * 10) / 10 : '',
+          切り出し範囲_下端: m.debugBandY1 != null ? Math.round(m.debugBandY1 * 10) / 10 : '',
+          辞書一致: m.itemMatched,
+          引き継ぎ: m.itemInherited,
+          引き継ぎ元の生テキスト: m.itemInheritedFromRaw || '',
+          SIZE: m.size,
+          QTY: m.qty
+        })));
+        console.groupEnd();
+      }
     } catch (e) {
       logOcrIssue('材料表OCR(QTY列スキャン)', e);
     }
@@ -2000,7 +2315,11 @@ function lawToCode(text) {
   if (!text) return 'N';
   const t = text.replace(/\s|　/g, '');
   if (/消防/.test(t)) return 'F';
-  if (/高圧ガス|高圧保安|大臣認定/.test(t)) return 'H';
+  // v38で追加：「大臣認定」の記載がある図面は、通常の高圧ガスとは区別して専用コード
+  // （表示は「認定」）として扱う。高圧ガスの判定より先に見る（「高圧ガス保安法　大臣認定適用」
+  // のように両方の文字列を含む図面があり、そちらを優先させたいため）。
+  if (/大臣認定/.test(t)) return 'NINTEI';
+  if (/高圧ガス|高圧保安/.test(t)) return 'H';
   if (/低圧ガス|ガス設備|ガス事業/.test(t)) return 'L';
   // 「適用法規」欄に明示的に「NONE」（該当法規なし）と記入されている図面がある。
   // 何も検出できなかった場合の既定値'N'と区別できるよう、専用のコードを割り当てる。
@@ -2010,11 +2329,12 @@ function lawToCode(text) {
   return 'N';
 }
 
-// 法規コード(F/H/L/N)を「材料集計(図面別)」シートC列(適用法規)に書き込む表示文字列に変換する。
+// 法規コード(F/H/L/N/NINTEI)を「材料集計(図面別)」シートC列(適用法規)に書き込む表示文字列に変換する。
 // 親図・要確認(土建図)には元々適用法規欄が無く lawCode は常に'N'になるため、その場合は空欄にする。
 function lawToText(lawCode) {
   if (lawCode === 'F') return '消防法';
   if (lawCode === 'H') return '高圧ガス';
+  if (lawCode === 'NINTEI') return '認定';
   if (lawCode === 'L') return '低圧ガス';
   if (lawCode === 'NONE') return 'NONE';
   return '';
@@ -2525,6 +2845,15 @@ function extractMaterials(annots, textContent, viewport) {
   // 図面の情報欄・検査欄に定型で出てくるラベル（品目ではない）。上記の帯による絞り込みに
   // 加えた保険として、既知の紛れ込みやすいものを明示的にも除外しておく。
   const NON_ITEM_LABEL_PATTERN = /^(LINE|TITLE|ISOME|REV\.?|CLIENT|JOB|JOB\s*NO\.?|DRAWING\s*NO\.?|NO\.?|プレファブ溶接部|現場溶接部|非破壊検査|耐圧試験媒体\/?圧力?|気密試験媒体\/?圧力?|W部|BW部|SW部|内部流体名称|設計圧力|設計温度|溶接後熱処理|断熱|適用法規|NONE|ORIGINAL|DRAFT|CHECKED|APPROVED|DATE|KPa|ELBOW|REDUCER)$/i;
+  // v39で追加：「（8割ナット）」「（認定弁）」「（認定品）」のように、品目ラベルの近くに
+  // 全角/半角カッコで囲まれた補足注記が印字されているテンプレートがある。これらは
+  // 独立した品目名ではなく、直前の品目（MACHINE BOLT&NUT・VALVE等）に対する注記に
+  // すぎないが、既知の品目名とは一致しないため、従来は「未知の品目」として新しい行
+  // （バンド）を勝手に作ってしまっていた。その結果、本来1つの品目ラベルの範囲に
+  // 余計な行が割り込み、以降の品目のSIZE/DESCRIPTION/QTYが軒並み1行ずつ下（または隣）
+  // にズレて誤集計される不具合があった（例：FLANGEの行に本来GASKETのデータが入る等）。
+  // カッコで囲まれた文字列全体は品目名になり得ないため、そもそもアンカー化しない。
+  const PARENTHETICAL_NOTE_PATTERN = /^[（(].*[）)]$/;
   const tableTopY = Math.min(...Object.values(headerCandidates).map(h => h.y));
   // 見出し行自体の下端（y + 文字高さ）。品目ラベル候補の絞り込み（tableTopYより上は除外）には
   // 見出しの「上端」を使う。
@@ -2575,6 +2904,7 @@ function extractMaterials(annots, textContent, viewport) {
     if (NOISE_LABEL_PATTERN.test(s)) continue;
     if (BOLT_CONTINUATION_PATTERN.test(s)) continue;
     if (NON_ITEM_LABEL_PATTERN.test(s)) continue;
+    if (PARENTHETICAL_NOTE_PATTERN.test(s)) continue;
     if (MATERIAL_ROW_DEFS.some(def => def.test(s))) continue; // 既知品目は上のループで処理済み
     const [vx, vy] = viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
     if (vx >= bounds.boundLeft || vx < itemLabelBandLeft) continue; // 品目ラベル列の帯から外れたものは対象外
@@ -2789,8 +3119,17 @@ function computeMaterialColumns(headerCandidates) {
   return {
     boundLeft:     headerX.SIZE - colW * 0.3,
     boundSizeDesc: (headerX.SIZE + headerX.DESCRIPTION) / 2,
-    boundDescQty:  headerX.DESCRIPTION + (headerX.QTY - headerX.DESCRIPTION) * 0.75,
-    boundQtyEnd:   headerX.QTY + (headerX.QTY - headerX.DESCRIPTION) * 0.15
+    // v44で修正：実際の図面（L-D-T26001-206）でDESCRIPTION/QTYの実際の罫線位置を
+    // ピクセル単位で計測したところ、QTY見出しの左端(headerX.QTY)からわずか5pt程度
+    // 手前（＝DESCRIPTION側からは約93%の位置）にあることが分かった。従来の0.75では
+    // 実際の罫線より約20pt手前でQTY欄の切り出しを始めてしまい、DESCRIPTION末尾の
+    // 数字（例：材質仕様「SUSF304」の"304"、ガスケット厚み「3.2t」の"3.2"、
+    // ボルト材質「SNB7/S45C」の"45"）がQTY欄側に混入し、本来のQTY値の代わりに
+    // これらの数字が数量として誤認識される不具合の原因になっていた。
+    // 同様にboundQtyEndも実測に合わせて広げ、QTY欄の右端が狭すぎて2桁の数量が
+    // 切れることが無いようにした。
+    boundDescQty:  headerX.DESCRIPTION + (headerX.QTY - headerX.DESCRIPTION) * 0.93,
+    boundQtyEnd:   headerX.QTY + (headerX.QTY - headerX.DESCRIPTION) * 0.24
   };
 }
 
@@ -2821,7 +3160,36 @@ function buildRowBands(anchors, firstRowTopY) {
   if (!anchors.length) return [];
   const sorted = [...anchors].sort((a, b) => a.y - b.y);
   const seenKeys = new Set();
-  const rows = sorted.filter(a => (seenKeys.has(a.key) ? false : (seenKeys.add(a.key), true)));
+  // v37で修正：同一キーは先頭（一番上）のみ採用するこのフィルターにより、
+  // 「STUD BOLT&NUT」行と「MACHINE BOLT&NUT」行のように、キーとしては同じ
+  // 'BOLT&NUT' だが図面上は別々の行として存在するケースで、2つ目以降の行が
+  // 丸ごと欠落してしまう不具合があった（SIZE/DESCRIPTION/QTYだけでなく
+  // ボルト種別＝マシン/スタッドの判定自体も失われていた）。
+  // 'BOLT&NUT' に限り、判定済みのボルト種別（マシン/スタッド/不明）も
+  // 重複判定のキーに含めることで、種別が異なる行はそれぞれ別行として残し、
+  // 同じ種別が本当に重複している場合（OCR・縦書き検出の重複等）だけを
+  // 従来通り除去するようにする。
+  const dedupKeyOf = a => a.key === 'BOLT&NUT' ? `BOLT&NUT:${deriveBoltType(a.label)}` : a.key;
+  // v39で修正：VALVE等、1つの品目ラベルが複数のテキスト行に分かれて印字されている
+  // 場合（例：「ボール弁」→「VALVE」の2行）、以前は2行目以降を単純に捨てていたため、
+  // アンカーのY座標がラベル本来の下端まで届かず、その品目の行の範囲が実際より
+  // 短くなり、直後の品目（次の行）の範囲を浸食してしまう不具合があった。
+  // 単純に捨てるのではなく、同じキーの中で最も下（Y座標が最大）のものまで
+  // アンカーのY座標を引き上げる（＝ラベル全体の下端に合わせる）ようにする。
+  const firstSeen = new Map(); // dedupKey -> row object（同一キー内で参照を共有し、Yだけ更新する）
+  const rows = [];
+  for (const a of sorted) {
+    const dk = dedupKeyOf(a);
+    const existing = firstSeen.get(dk);
+    if (!existing) {
+      const row = { key: a.key, y: a.y, label: a.label };
+      firstSeen.set(dk, row);
+      rows.push(row);
+    } else if (a.y > existing.y) {
+      existing.y = a.y; // ラベル内で最も下の行までアンカーのY座標を引き下げる
+    }
+  }
+  rows.sort((a, b) => a.y - b.y);
   const firstRowTop = Number.isFinite(firstRowTopY) ? firstRowTopY : -Infinity;
   // v15で試みた「見出し行の上端まで1行目の帯を広げる」改修はv16で取り消した。
   // 実際の図面で見出し行のさらに上（表の外）に書かれた溶接番号等の注記（例：「1410」）が
@@ -3393,6 +3761,131 @@ function fuzzyMatchMaterialDef(text) {
   return null;
 }
 
+// v41で追加：OCR経由の材料集計（scanQtyColumnForMissingRows）では、これまでITEM欄（品目名）も
+// SIZE/DESCRIPTION/QTYと同じくOCR画像認識で読み取っていた。しかし実際の図面（例：
+// L-D-T26001-206）を調査したところ、品目ラベル列（PIPE・TEE・FLANGE・GASKET等）は
+// テンプレート上、通常のPDFテキストとして埋め込まれており、pdf.jsのテキスト抽出で
+// 確実に取得できることが判明した（OCRが本当に必要なのはSIZE/DESCRIPTION/QTYの
+// 実データ値だけで、品目ラベルという「凡例」自体は多くの図面でテキストのまま）。
+// それにもかかわらず品目名までOCR画像認識任せにしていたため、「PIPE」「TEE」のような
+// 短い単語がわずかに誤読されただけで辞書と完全一致せず、さらに未一致行を「一番近い
+// 認識済みラベルから品目名を借用する」救済処理（下のknownIdx処理）に回された結果、
+// 本来PIPE/TEEであるはずの行が別の品目名にすり替わって出力から消えて見える、
+// という不具合が起きていた。
+// extractMaterials()（テキスト抽出専用ルート）は既に同じ状況をテキストベースの
+// アンカー収集＋buildRowBands()で確実に処理できているため、その考え方をOCRルートにも
+// 移植し、品目ラベルがテキストとして存在する行は、OCR画像認識より先にこちらを優先する
+// （テキストが本当に1つも見つからない＝完全にアウトライン化された図面の場合のみ、
+// 従来通りOCR画像認識にフォールバックする）。
+function collectTextBasedItemBands(textContent, viewport, bounds, tableTopY, tableHeaderBottomY, itemLabelBandLeft) {
+  const anchors = [];
+  for (const it of textContent.items) {
+    const s = (it.str || '').trim();
+    for (const def of MATERIAL_ROW_DEFS) {
+      if (def.test(s)) {
+        const [vx, vy] = viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
+        anchors.push({ key: def.key, y: vy, x: vx, label: s });
+        break;
+      }
+    }
+  }
+  // 縦書き（90°回転・1文字ずつ描画）の品目ラベルも救済する（VALVE等。extractMaterials()と同じ関数を再利用）。
+  anchors.push(...collectVerticalAnchors(textContent, viewport, bounds.boundLeft));
+
+  // MATERIAL_ROW_DEFS未登録の未知品目（新規追加された品目等）も、品目ラベル列の帯に
+  // 印字されているテキストとして拾っておく（extractMaterials()の考え方を簡略移植）。
+  const NOISE_LABEL_PATTERN = /^[\d.,:：%\-\/]+$/;
+  const BOLT_CONTINUATION_WORDS = 'MACHINE|マシン|STUD|スタッド|&|NUT|ナット';
+  const BOLT_CONTINUATION_PATTERN = new RegExp(`^(?:${BOLT_CONTINUATION_WORDS})(?:\\s+(?:${BOLT_CONTINUATION_WORDS}))*$`, 'i');
+  const NON_ITEM_LABEL_PATTERN = /^(LINE|TITLE|ISOME|REV\.?|CLIENT|JOB|JOB\s*NO\.?|DRAWING\s*NO\.?|NO\.?|プレファブ溶接部|現場溶接部|非破壊検査|耐圧試験媒体\/?圧力?|気密試験媒体\/?圧力?|W部|BW部|SW部|内部流体名称|設計圧力|設計温度|溶接後熱処理|断熱|適用法規|NONE|ORIGINAL|DRAFT|CHECKED|APPROVED|DATE|KPa|ELBOW|REDUCER)$/i;
+  const PARENTHETICAL_NOTE_PATTERN = /^[（(].*[）)]$/;
+  for (const it of textContent.items) {
+    const s = (it.str || '').trim();
+    if (!s || s.length < 2) continue;
+    if (['ITEM', 'SIZE', 'DESCRIPTION', 'QTY'].includes(s.toUpperCase())) continue;
+    if (NOISE_LABEL_PATTERN.test(s)) continue;
+    if (BOLT_CONTINUATION_PATTERN.test(s)) continue;
+    if (NON_ITEM_LABEL_PATTERN.test(s)) continue;
+    if (PARENTHETICAL_NOTE_PATTERN.test(s)) continue;
+    if (MATERIAL_ROW_DEFS.some(def => def.test(s))) continue; // 既知品目は上のループで処理済み
+    const [vx, vy] = viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
+    if (vx >= bounds.boundLeft || vx < itemLabelBandLeft) continue; // 品目ラベル列の帯から外れたものは対象外
+    if (vy < tableTopY) continue; // 見出し行より上（表の外）は対象外
+    anchors.push({ key: s, y: vy, x: vx, label: s, isDynamic: true });
+  }
+
+  // v45で追加：extractMaterials()には元々あった「MACHINE/STUD/&/NUT等の継続語を
+  // 一番近いBOLT&NUTアンカーへ合成し、そのアンカーのY座標をラベル本来の下端まで
+  // 引き下げる」処理が、この関数（OCRベースの経路で使われる）には無かった。
+  // そのため「STUD BOLT & NUT」と「MACHINE BOLT & NUT」はどちらもラベルが単なる
+  // 「BOLT」1語のままderiveBoltType()が種別を判定できず（＝空文字同士で一致し）、
+  // buildRowBands()の重複排除ロジックが2つの行を1つの帯に統合してしまっていた。
+  // 統合された帯は本来より広く（浅い方の行の直後〜深い方の行の直後まで）なり、
+  // 本来は次の品目（VALVE等）の行であるはずのQTY値まで巻き込んでしまい、
+  // 「BOLT&NUTとしてVALVEのサイズ・数量が集計される」不具合の原因になっていた。
+  // extractMaterials()と同じロジックをここにも適用し、種別ごとに正しく別の帯へ分離する。
+  const boltAnchorsForBand = anchors.filter(a => a.key === 'BOLT&NUT');
+  if (boltAnchorsForBand.length) {
+    // この関数はPDF注釈(avgH算出の元)を受け取らないため、品目ラベル帯のテキスト高さ
+    // から平均文字高さを見積もる（無ければextractMaterials同様のデフォルト8ptを使う）。
+    let heightSum = 0, heightCount = 0;
+    for (const it of textContent.items) {
+      const h = it.height || 0;
+      if (h > 0) { heightSum += h; heightCount++; }
+    }
+    const avgH = heightCount ? heightSum / heightCount : 8;
+    const mergeTolerance = Math.max(12, avgH * 3);
+    for (const it of textContent.items) {
+      const s = (it.str || '').trim();
+      if (!s || !BOLT_CONTINUATION_PATTERN.test(s)) continue;
+      if (MATERIAL_ROW_DEFS.some(def => def.test(s))) continue; // 既にBOLTを含む等、単独でアンカー化済みの行は対象外
+      const [vx, vy] = viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
+      if (vx >= bounds.boundLeft) continue; // 品目ラベル列より右（値エリア）は対象外
+      let nearest = null, nearestDist = Infinity;
+      for (const ba of boltAnchorsForBand) {
+        const dist = Math.abs(ba.y - vy);
+        if (dist < nearestDist) { nearest = ba; nearestDist = dist; }
+      }
+      if (nearest && nearestDist <= mergeTolerance) {
+        nearest.label = nearest.label + ' ' + s;
+        nearest.y = Math.max(nearest.y, vy); // ラベル内で最も下の行までアンカーのY座標を引き下げる
+      }
+    }
+  }
+
+  // v45で追加：「（8割ナット）」「（認定弁）」等、品目ラベルの直下に付く括弧書きの
+  // 補足注記も、そのラベル本来の帯の一部（＝下端）とみなし、一番近い品目アンカーの
+  // Y座標をそこまで引き下げる。これが無いと、注記の分だけ次の品目の帯が浅い位置から
+  // 始まってしまい、次の品目のデータ行と誤って重なる余地が生まれる。
+  if (anchors.length) {
+    let noteHeightSum = 0, noteHeightCount = 0;
+    for (const it of textContent.items) {
+      const h = it.height || 0;
+      if (h > 0) { noteHeightSum += h; noteHeightCount++; }
+    }
+    const noteAvgH = noteHeightCount ? noteHeightSum / noteHeightCount : 8;
+    const noteMergeTolerance = Math.max(12, noteAvgH * 3);
+    for (const it of textContent.items) {
+      const s = (it.str || '').trim();
+      if (!s || !PARENTHETICAL_NOTE_PATTERN.test(s)) continue;
+      const [vx, vy] = viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
+      if (vx >= bounds.boundLeft || vx < itemLabelBandLeft) continue; // 品目ラベル列の帯の外は対象外
+      let nearest = null, nearestDist = Infinity;
+      for (const an of anchors) {
+        if (an.y > vy) continue; // 注記より上にあるアンカーだけを対象にする（注記はラベルの下に付く）
+        const dist = vy - an.y;
+        if (dist < nearestDist) { nearest = an; nearestDist = dist; }
+      }
+      if (nearest && nearestDist <= noteMergeTolerance) {
+        nearest.y = Math.max(nearest.y, vy);
+      }
+    }
+  }
+
+  if (!anchors.length) return [];
+  return buildRowBands(anchors, tableHeaderBottomY);
+}
+
 async function scanQtyColumnForMissingRows(page, textContent, viewport) {
   const headerCandidates = {};
   for (const it of textContent.items) {
@@ -3427,6 +3920,10 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
     ? viewport.width * activeProfileForBand.itemLeftRatio
     : bounds.boundLeft - Math.max(80, colWForBand * 2.5);
 
+  // v41で追加：品目ラベルがテキストとして読める場合は、OCR画像認識より先にそちらを使う
+  // （詳しい経緯は collectTextBasedItemBands のコメントを参照）。
+  const textItemBands = collectTextBasedItemBands(textContent, viewport, bounds, tableHeaderBottomY, tableHeaderBottomY, itemLabelBandLeft);
+
   let pageCanvas;
   try {
     pageCanvas = await renderPageForOcr(page);
@@ -3448,10 +3945,24 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
   const scanBottom = titleBlockLabel
     ? Math.max(tableHeaderBottomY, titleBlockLabel.y - 4)
     : viewport.height * tableAreaRatioForBand;
+  // v42で追加：QTY列の走査範囲の上端(tableHeaderBottomY)は「見出し文字の下端＋わずかな
+  // 余白(OCR_PADDING_PT=3pt)」で決めているが、見出し文字の高さ推定が実際よりわずかに
+  // 大きく出るテンプレートでは、この上端が1行目のデータ（例：PIPEの80A行）のすぐ真上
+  // まで食い込んでしまい、1行目のQTYの数字が範囲の外／ギリギリで切れてOCRに一切
+  // 引っかからず、その行自体が「検出されない」という不具合が起きていた
+  // （実例：L-B-T26001-65-102のPIPE行、80Aだけが拾えず40Aは拾えるケース）。
+  // 見出し行に数字は含まれない（ITEM/SIZE/DESCRIPTION/QTYという単語のみ）ため、
+  // 上端を少し余分に広げてもQTY列としての誤検出は起きにくい。安全側に倒して、
+  // 1行目のデータが多少見出しに近くても数字を取りこぼさないようにする。
+  // v44で修正：この値をtryブロック内のローカル変数にしていたため、下のページ座標への
+  // 逆算箇所（候補行のY座標を求める処理）から参照できず、逆算がズレる不具合が
+  // あった。関数スコープに引き上げ、両方から同じ値を使えるようにする。
+  const QTY_SCAN_TOP_EXTRA_MARGIN = 8; // pt
   let qtyLines;
   try {
     const qtyCrop = cropForOcr(pageCanvas, {
-      x0: bounds.boundDescQty, x1: bounds.boundQtyEnd, y0: tableHeaderBottomY, y1: scanBottom
+      x0: bounds.boundDescQty, x1: bounds.boundQtyEnd,
+      y0: Math.max(0, tableHeaderBottomY - QTY_SCAN_TOP_EXTRA_MARGIN), y1: scanBottom
     });
     qtyLines = await withTimeout(recognizeCropDetailed(qtyCrop), 30000, 'OCR認識（QTY列スキャン）');
   } catch (e) {
@@ -3461,11 +3972,23 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
 
   const candidates = [];
   for (const line of qtyLines) {
-    const m = normalizeWidthAndSpaces(line.text).match(/\d+(?:\.\d+)?/);
-    if (!m) continue; // 数字らしくない行（かすれ・罫線の誤認識等）は無視する
+    // v44で修正：以前はこの行の最初の数字だけを見ていたため、boundDescQtyの誤差で
+    // DESCRIPTION欄末尾の数字（材質仕様の"304"等）がQTY欄側に混入していた場合、
+    // 本来のQTY値より先にそちらを拾ってしまっていた。cleanOcrQty()と同じ考え方
+    // （QTY欄はどんな混入があっても本来の値が一番右に来るため、最後に見つかった
+    // 数字を採用する）に統一する。
+    const nums = normalizeWidthAndSpaces(line.text).match(QTY_NUMERIC_PATTERN);
+    if (!nums || !nums.length) continue; // 数字らしくない行（かすれ・罫線の誤認識等）は無視する
     const centerLocalY = (line.y0 + line.y1) / 2;
-    const pageY = tableHeaderBottomY - OCR_PADDING_PT + centerLocalY / OCR_SCALE;
-    candidates.push({ qty: m[0], y: pageY });
+    // v44で修正：QTY列走査の切り出し開始位置(y0)にQTY_SCAN_TOP_EXTRA_MARGIN分の
+    // 上方向オフセットを追加したにもかかわらず、ここでページ座標へ逆算する式に
+    // その分を反映し忘れていた。その結果、検出される全行のY座標が実際より
+    // QTY_SCAN_TOP_EXTRA_MARGIN(8pt)分だけ下にズレて計算され、行の高さ(約14pt)に
+    // 対してこのズレが無視できない大きさだったため、SIZE/DESCRIPTION欄の切り出し
+    // 範囲が実際の行から1行分近くズレて隣の行の内容を拾ってしまう不具合の
+    // 主因になっていた（例：PIPEの80A行の内容が読めず、40A行に文字が漏れて見える）。
+    const pageY = (tableHeaderBottomY - QTY_SCAN_TOP_EXTRA_MARGIN) - OCR_PADDING_PT + centerLocalY / OCR_SCALE;
+    candidates.push({ qty: nums[nums.length - 1], y: pageY });
   }
   if (!candidates.length) return [];
 
@@ -3501,10 +4024,23 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
     const bandY0 = c.y - rowHalfHeight;
     const bandY1 = c.y + rowHalfHeight;
     let itemText = '', sizeText = '', descText = '';
-    try {
-      const itemCrop = cropForOcr(pageCanvas, { x0: itemLabelBandLeft, x1: bounds.boundLeft, y0: bandY0, y1: bandY1 });
-      itemText = stripHeaderLeak(normalizeWidthAndSpaces(await recognizeCrop(itemCrop)));
-    } catch (e) { /* 品目名が読めなくても他の項目は出力を試みる */ }
+    let rawSizeDescForDebug = ''; // v43: デバッグ用に、分割前のOCR生結果を保持しておく
+    // v41で追加：まずテキストベースの品目ラベル帯（collectTextBasedItemBands）でこのQTY行の
+    // Y座標がどの品目に属するか判定する。品目ラベルが結合セル（複数行にまたがる1つの表記）
+    // であっても、buildRowBands()は「隣の品目ラベルとの中間まで」を1つの帯として扱うため、
+    // 帯の中に複数のQTY行が収まっていれば正しく同じ品目に振り分けられる。
+    // 一致すればOCR画像認識は行わず、この結果をそのまま採用する（誤読の余地が無いテキスト
+    // 情報を優先する）。一致しなかった場合（＝品目ラベルが本当にテキストとして存在しない
+    // 図面）のみ、従来通りITEM欄を画像としてOCR認識する。
+    const textBand = textItemBands.find(b => c.y >= b.y0 && c.y < b.y1);
+    if (textBand) {
+      itemText = textBand.label;
+    } else {
+      try {
+        const itemCrop = cropForOcr(pageCanvas, { x0: itemLabelBandLeft, x1: bounds.boundLeft, y0: bandY0, y1: bandY1 });
+        itemText = stripHeaderLeak(normalizeWidthAndSpaces(await recognizeCrop(itemCrop)));
+      } catch (e) { /* 品目名が読めなくても他の項目は出力を試みる */ }
+    }
     // v12で変更：SIZEとDESCRIPTIONの間には印刷された罫線が無く、実際の区切り位置は
     // 品目ごとに左右へズレる（例：SIZE欄が短い行と長い行が混在）。固定のX座標で
     // 2回に分けてOCRすると、どちらかの欄がぎりぎりで欠けたり余計な文字が混入したりする。
@@ -3517,12 +4053,16 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
       // v14で追加：罫線のかすれ等をOCRが「-」「[」「—」等の記号だけとして誤認識した
       // 結果は、意味のあるデータとはみなさず空文字として扱う（cleanOcrSizeと同じ考え方）。
       const rawSizeDesc = hasMeaningfulChars(rawSizeDescBeforeGuard) ? rawSizeDescBeforeGuard : '';
+      rawSizeDescForDebug = rawSizeDesc;
       const split = splitSizeAndDescriptionOcr(rawSizeDesc);
       sizeText = cleanOcrSize(split.size);
       descText = split.description;
     } catch (e) { /* noop */ }
 
-    const matchedDef = fuzzyMatchMaterialDef(itemText);
+    // v41で追加：テキスト帯で品目が確定している場合はそれを最優先で使う（辞書に無い
+    // 未知品目名がテキストとして印字されているケースも、そのままの表記を品目名として
+    // 正しく採用できる）。テキスト帯が無い場合のみ、従来通りOCR結果を辞書と照合する。
+    const matchedDef = textBand ? { key: textBand.key } : fuzzyMatchMaterialDef(itemText);
     const { desc: descClean, tag: descTag } = extractSupplyReuseTag(descText, '');
     // v22で追加：OCR ONのときに「支給/転用」が出力されない問題への対策。
     // 従来はDESCRIPTION欄のOCR結果にしか「支給」「転用」「既設転用」の文字を
@@ -3545,12 +4085,23 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
       tag,
       qty: c.qty,
       boltType: '',
-      readMethod: 'OCR(自動検出行)',
+      readMethod: textBand ? 'OCR(自動検出行/品目名はテキスト抽出)' : 'OCR(自動検出行)',
       sizeFromOcr: !!sizeText,
       descFromOcr: !!(descClean || descText),
       itemInherited: false,
       itemMatched: !!matchedDef,
-      itemTextEmpty: !itemText // このOCR枠から本当に何の文字も読み取れなかったか
+      itemTextEmpty: !itemText, // このOCR枠から本当に何の文字も読み取れなかったか
+      // デバッグ用：ITEM欄から実際にOCRで読み取れた生テキスト（一致・不一致・引き継ぎの
+      // 判断根拠を後から確認できるよう保持しておく。品目名が想定外のものに化けた場合、
+      // ここを見れば「そもそも何も読めなかったのか」「読めたが辞書にない文字列だったのか」
+      // を切り分けられる）。
+      itemRawOcrText: itemText,
+      // v43で追加：SIZE/DESCRIPTION分割前のOCR生結果と、この行の切り出し範囲(Y座標)。
+      // 隣接する行の文字が混ざる／途中で切れるといった不具合の切り分け用。
+      rawSizeDescOcrText: rawSizeDescForDebug,
+      debugQtyY: c.y,
+      debugBandY0: bandY0,
+      debugBandY1: bandY1
     });
   }
 
@@ -3581,6 +4132,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
       }
       row.item = rows[nearest].item;
       row.itemInherited = true; // プレビューで「結合セルから引き継いだ値」と分かるように印を付ける
+      row.itemInheritedFromRaw = rows[nearest].itemRawOcrText; // どの行の何という表記から借用したか（デバッグ・ツールチップ用）
     });
   }
 
@@ -3594,8 +4146,16 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
 function splitSizeAndDescriptionOcr(text) {
   const s = String(text || '').trim();
   if (!s) return { size: '', description: '' };
-  const m = s.match(/^([0-9]+(?:\.[0-9]+)?\s*[A-Za-zＡ-Ｚａ-ｚ]{0,3}(?:\s*[xX×]\s*[0-9]+(?:\.[0-9]+)?\s*[A-Za-z]{0,3})?(?:用|#)?)\s+(\S.*)$/);
-  if (m) return { size: m[1].trim(), description: m[2].trim() };
+  // v42で修正：以前は文字列の先頭(^)がサイズ表記そのものであることを要求していたが、
+  // 罫線に頼らず1回でOCRした結果、枠線のかすれ等がサイズ表記の直前に余計な1〜数文字
+  // （例：「SUA 40A…」の「SUA」）として混入することがあり、厳密な先頭一致だと分割が
+  // 丸ごと失敗し、サイズ欄が空のままDESCRIPTION（材質欄）に全部が落ちてしまっていた。
+  // サイズ表記らしきトークンの直前に5文字以内の余計な文字が付いているだけなら、
+  // それをノイズとして読み捨て、サイズ表記から後ろだけを正しく切り出す。
+  // ただし本文中のどこか離れた位置にある数字（別の意味の数値）まで誤ってサイズ扱い
+  // しないよう、出現位置が先頭付近（5文字以内）にある場合に限定する。
+  const m = s.match(/^(\S{0,5}?\s*)([0-9]+(?:\.[0-9]+)?\s*[A-Za-zＡ-Ｚａ-ｚ]{0,3}(?:\s*[xX×]\s*[0-9]+(?:\.[0-9]+)?\s*[A-Za-z]{0,3})?(?:用|#)?)\s+(\S.*)$/);
+  if (m) return { size: m[2].trim(), description: m[3].trim() };
   return { size: '', description: s };
 }
 
@@ -3686,6 +4246,28 @@ async function enhanceRowsWithOCR(page, rows) {
 
     if (anyAttempted) {
       row.readMethod = anyFilled ? 'OCR補完' : 'OCR(未検出)';
+    }
+
+    // v45で追加：BOLT&NUT/VALVE等の品目取り違えバグの修正。
+    // reclassifyBoltGasket()（DESCRIPTIONの実際の表記パターンから品目を照合し直す
+    // 安全網）は、従来このOCR補完処理より前（rowsFromCells側、placeholder行生成時）
+    // にしか呼ばれていなかった。ところが本図面のように材料表の値がすべて図形化されて
+    // おり、DESCRIPTIONがテキストとしては空欄（isPlaceholder行）のまま、この関数の
+    // 後段（enhanceRowsWithOCR）でOCRによって初めて実際の文字列が入るケースでは、
+    // reclassifyBoltGasket()が呼ばれた時点ではまだDESCRIPTIONが空文字列だったため
+    // 判定できず、以後一度も再チェックされないまま「品目：VALVE」等、行の帯（Y座標）
+    // だけで決まった誤った品目名が確定してしまっていた。
+    // 例：「MACHINE BOLT & NUT（8割ナット）」の帯は、ラベル文字列自体の下端を基準に
+    // Y方向の帯（行の範囲）を区切っているが、実際の罫線（セルの下端）はラベル文字列
+    // より下まで続いていることがあり、2行目以降のボルトサイズ（例：M16x55L SNB7/S45C）
+    // がOCR上は隣の帯（次の品目＝VALVE）側の帯に含まれてしまうことがある。
+    // そのため、OCRでDESCRIPTIONが埋まった直後にもreclassifyBoltGasket()を再度
+    // 実行し、DESCRIPTIONの実際の表記（ボルト径×長さ表記か等）に基づいて品目を
+    // 判定し直す。テキスト抽出のみで完結する図面には影響しない（DESCRIPTIONが
+    // 変わらなければreclassifyBoltGasket()の結果も従来と同じになるため）。
+    if (anyFilled) {
+      const reclassified = reclassifyBoltGasket(row);
+      Object.assign(row, reclassified);
     }
   }
 
@@ -3937,7 +4519,15 @@ function buildOutputRows() {
   pageData.forEach((e, pageIdx) => {
     const key = e.drawingNo || '(未検出)';
     (e.materials || []).forEach((m, matIdx) => {
+      // v35で追加：ITEM欄もプレビュー表から直接編集できるようにしたため、まずITEM自体の
+      // マイ辞書補正を適用してからboltDisplayItem等の以降の判定に使う（ITEM辞書は品目名で
+      // スコープすると循環してしまうため、他の3欄と違いスコープ無し＝共通の辞書として扱う）。
+      const itemDictFixed = applyOcrCellCorrectionForItem(m);
       const item = boltDisplayItem(m.item, m.boltType);
+      // v34で追加：プレビュー表で直接編集して覚えさせたOCRセル修正辞書を最優先で適用する。
+      // 以降のサイズ・材質・数量に関する計算・規格チェックは、すべてこの適用後の値を使う。
+      const dictFixedInfo = applyOcrCellCorrections(m, item);
+      if (itemDictFixed) dictFixedInfo.unshift(itemDictFixed);
       // テスト機能：OCR補完で実際に読み取った「セル」（＝テキストとして確実に取れたわけではない
       // セル）だけを対象に、実在する規格値と照合する。テキスト由来のセルは元々信頼できるため
       // チェック対象外とする（誤検知でテキスト由来のセルにまで警告を出さないため）。
@@ -4036,7 +4626,14 @@ function buildOutputRows() {
         : null;
       const newDrawing = prevDrawingNo !== null && key !== prevDrawingNo;
       prevDrawingNo = key;
-      const { pipeClass, gasketClass, insulationSpec } = extractPipeAndGasketClass(e.lineNo);
+      // v35で追加：配管クラス／ガスケットクラスはLINE No.から自動算出するのが基本だが、
+      // プレビュー表から直接上書き修正できるようにする（e.pipeClassOverride／
+      // e.gasketClassOverrideがページ単位で保持する）。LINE No.自体を後から編集し直した
+      // 場合は、editable-titleblockのblur処理側でこの上書きをクリアし、再度自動算出に戻す。
+      const derivedClass = extractPipeAndGasketClass(e.lineNo);
+      const pipeClass = (e.pipeClassOverride != null && e.pipeClassOverride !== '') ? e.pipeClassOverride : derivedClass.pipeClass;
+      const gasketClass = (e.gasketClassOverride != null && e.gasketClassOverride !== '') ? e.gasketClassOverride : derivedClass.gasketClass;
+      const insulationSpec = derivedClass.insulationSpec;
       const materialText = normalizeMaterialText(m.description);
       const specWarnings = computeSpecWarningsForMaterial(m);
       rows.push({
@@ -4070,6 +4667,7 @@ function buildOutputRows() {
         specWarnings, // テスト機能で追加（人が選ぶ必要がある候補・構造化データ）
         specWarning: specWarnings.map(w => w.label).join('、'), // テスト機能で追加（Excel出力用の文字列）
         autoFixedInfo, // テスト機能で追加（自動修正済みの項目。色付け表示・元に戻す用）
+        dictFixedInfo, // v34で追加：マイ辞書（OCRセル修正辞書）による自動修正の項目。赤色表示に使う
         newDrawing
       });
 
@@ -4097,6 +4695,23 @@ function classifyMaterialClass(itemText) {
   if (/PVC/i.test(t)) return 'PVC';
   return 'CS';
 }
+// v36で追加：プレビュー表の見た目に関する設定（列幅・表示行数）。
+// ・PREVIEW_BOX_MAX_HEIGHT：スクロール枠の高さ。1行約32px想定で10行強が収まる高さにしてある。
+// ・DEFAULT_COL_WIDTH／previewColWidths：列幅を手動ドラッグで変更できるようにするための値。
+//   表は折り返し優先ではなく「幅が足りない列は省略記号(…)で切り、必要なら列の右端を
+//   ドラッグして広げて確認する」という挙動にする（table-layout:fixedと組み合わせて使う）。
+//   previewColWidthsはドラッグで変更した値を保持する（ページを開いている間のみ。再読み込みで初期値に戻る）。
+const PREVIEW_BOX_MAX_HEIGHT = 400;
+const DEFAULT_COL_WIDTH = {
+  A: 60, B: 64, C: 84, D: 64, E: 56, F: 130, G: 88, H: 150, I: 84, J: 104,
+  K: 108, L: 84, M: 200, N: 56, O: 52, P: 56, Q: 76, R: 64, S: 76, T: 68,
+  U: 48, V: 40, W: 56, X: 56, Y: 78, Z: 260, __src: 140
+};
+const previewColWidths = {};
+function getColWidth(col) {
+  return previewColWidths[col] || DEFAULT_COL_WIDTH[col] || 90;
+}
+
 const COLUMN_DEFS = [
   { col: 'A', header: '計算式用',       autoFilled: false },
   // v16で追加：断熱仕様の左に、ITEM列の文字列からSUS/PVC/CSを自動判定して入れる列。
@@ -4175,6 +4790,13 @@ function formatPageLabel(e) {
 }
 
 function renderPreview() {
+  // v36で追加：セルを編集するたびに表全体を作り直すため、何もしないとスクロール位置が
+  // 先頭に戻ってしまう（下の方のセルを編集しようとクリックすると上に戻ってしまう不具合の原因）。
+  // 再描画の前にスクロール位置を覚えておき、再描画後に同じ位置へ戻す。
+  const prevScrollBox = document.getElementById('previewScrollBox');
+  const prevScrollTop = prevScrollBox ? prevScrollBox.scrollTop : 0;
+  const prevScrollLeft = prevScrollBox ? prevScrollBox.scrollLeft : 0;
+
   if (!pageData.length) {
     previewWrap.innerHTML = '<div class="empty">解析結果がありません。</div>';
     return;
@@ -4362,9 +4984,12 @@ function renderPreview() {
   // Excelテンプレートの列（A〜X列）とまったく同じ列・同じ並び順で表示する。
   // 自動抽出できない列は空欄のまま列位置だけ揃えるので、コピーしてExcelに貼り付けても列がズレない。
   // 「元ファイル」は参考情報のため、A〜X列の並びを崩さないよう一番最後に追加する。
-  html += `<div style="max-height:480px; overflow:auto;"><table><thead><tr>
-    ${COLUMN_DEFS.map(def => `<th${!def.autoFilled ? ' style="color:#9aa4ad; font-weight:500;"' : ''}>${escapeHtml(def.header) || '&nbsp;'}</th>`).join('')}
-    ${multi ? '<th>元ファイル</th>' : ''}
+  html += `<div id="previewScrollBox" style="max-height:${PREVIEW_BOX_MAX_HEIGHT}px; overflow:auto;"><table class="mat-table"><colgroup>
+    ${COLUMN_DEFS.map(def => `<col data-col="${def.col}" style="width:${getColWidth(def.col)}px;">`).join('')}
+    ${multi ? `<col data-col="__src" style="width:${getColWidth('__src')}px;">` : ''}
+  </colgroup><thead><tr>
+    ${COLUMN_DEFS.map(def => `<th data-col="${def.col}"${!def.autoFilled ? ' style="color:#9aa4ad; font-weight:500;"' : ''}><span class="th-label">${escapeHtml(def.header) || '&nbsp;'}</span><span class="col-resizer" data-col="${def.col}"></span></th>`).join('')}
+    ${multi ? '<th data-col="__src">元ファイル<span class="col-resizer" data-col="__src"></span></th>' : ''}
   </tr></thead><tbody>`;
   rows.forEach(r => {
     const isOcr = String(r.readMethod || '').startsWith('OCR');
@@ -4374,8 +4999,15 @@ function renderPreview() {
     // 低かったセルは、他のOCR行（紫色）よりさらに目立つ赤枠で強調し、優先的に確認して
     // もらえるようにする。
     const hasLowConfidence = !!(r.lowConfidenceFields && r.lowConfidenceFields.length);
+    // v40で追加：ITEM欄がその行自体からは読み取れず、近くの（別の）行から品目名を
+    // 借用（引き継ぎ）した行を、他の警告色（赤枠=信頼度低下／オレンジ破線=規格要確認／
+    // 緑=自動修正済み）とは別の紫色で目立たせる。これまでこの状態はデータ上は
+    // 記録されていた（itemInherited）ものの画面上どこにも表示されておらず、例えば
+    // PIPE・TEEのように品目ラベルが結合セルで印字されているテンプレートで、本来の
+    // 品目名が別の品目名に静かに置き換わっていても気付けない不具合があった。
+    const hasItemInherited = !!r.itemInherited;
     const trStyle = r.newDrawing ? ' style="border-top:3px solid var(--navy);"' : '';
-    const trClasses = [isOcr ? 'ocr-row' : '', hasSpecWarning ? 'spec-warn-row' : '', hasAutoFixed ? 'auto-fixed-row' : '', hasLowConfidence ? 'low-confidence-row' : ''].filter(Boolean).join(' ');
+    const trClasses = [isOcr ? 'ocr-row' : '', hasSpecWarning ? 'spec-warn-row' : '', hasAutoFixed ? 'auto-fixed-row' : '', hasLowConfidence ? 'low-confidence-row' : '', hasItemInherited ? 'item-inherited-row' : ''].filter(Boolean).join(' ');
     // テスト機能：自動修正された項目が、サイズ(L)・材質(M)のどちらの列に影響したかを
     // 判定し、実際に値が表示されているそのセル自体も色付けする（表の見た目上、
     // 「どこが直ったか」がY列を見なくても分かるようにするため）。
@@ -4386,6 +5018,12 @@ function renderPreview() {
     // specWarningsが指しているのがSIZE(L列)なのか材質(M列)なのかを判定し、そのセル自体を
     // オレンジ色の破線枠で強調する（赤枠＝信頼度低下、緑＝自動修正済み、と重ならない配色）。
     const warnCols = new Set((r.specWarnings || []).map(w => w.type === 'size' ? 'L' : 'M'));
+    // v34で追加：マイ辞書（OCRセル修正辞書）によって自動修正された欄を赤字で強調する。
+    // 既存の色（緑=規格チェックの自動修正／オレンジ破線=要確認／赤枠=OCR信頼度低下）とは
+    // 重ねられるよう、背景ではなく文字色で表現し、区別できるようにしている。
+    const dictFixedMap = new Map((r.dictFixedInfo || []).map(d => [
+      d.field === 'size' ? 'L' : d.field === 'qty' ? 'N' : d.field === 'item' ? 'K' : 'M', d
+    ]));
     html += `<tr class="${trClasses}"${trStyle} id="mrow-${escapeHtml(String(r.rowId).replace(/[^A-Za-z0-9_-]/g, '_'))}">
       ${COLUMN_DEFS.map(def => {
         if (def.col === 'Y') {
@@ -4424,14 +5062,49 @@ function renderPreview() {
         // その代わりセル自体を直接編集可能にし、訂正した内容をタイトルブロック専用の
         // 補正辞書（TITLE_BLOCK_CORRECTIONS）に記録する。同じ図面の他の行にも同じ値が
         // 入っている（1ページ＝1つの値）ため、pageIdxを頼りに該当ページの全行へ反映する。
-        if (def.col === 'F' || def.col === 'G' || def.col === 'H') {
-          const fieldMap = { F: 'drawingNo', G: 'lawCode', H: 'lineNo' };
+        // v35で追加：配管クラス(I列)・ガスケットクラス(J列)も同じ仕組みに乗せる。ただし
+        // この2つはLINE No.からの自動算出値のため、専用の上書きフィールド
+        // （pipeClassOverride／gasketClassOverride）に保存し、LINE No.そのものは書き換えない
+        // （＝配管クラス側を直しても横のLINE No.欄には反映させない）。
+        if (def.col === 'F' || def.col === 'G' || def.col === 'H' || def.col === 'I' || def.col === 'J') {
+          const fieldMap = { F: 'drawingNo', G: 'lawCode', H: 'lineNo', I: 'pipeClassOverride', J: 'gasketClassOverride' };
           const field = fieldMap[def.col];
           const displayVal = columnDisplayValue(def, r);
           return `<td class="mono editable-titleblock" contenteditable="true" spellcheck="false"
-              data-row-id="${escapeHtml(r.rowId)}" data-field="${field}"
+              data-row-id="${escapeHtml(r.rowId)}" data-field="${field}" data-current-value="${escapeHtml(displayVal)}"
               title="クリックして修正できます（法規はコードではなく表示テキストで入力してください）"
               >${escapeHtml(displayVal)}</td>`;
+        }
+        // v34で追加：サイズ(L)・材質(M)・数量(N)は、プレビュー表から直接クリックして
+        // 修正できるようにする。訂正内容はOCRセル修正辞書に即時保存され、以降は同じ品目・
+        // 同じ誤読文字列について自動で反映される（自動反映されたセルは赤字で表示）。
+        // v35で追加：ITEM(K)も同様に編集可能にする。ただしITEM辞書は品目名でスコープ
+        // できない（訂正前の品目名自体が辞書のキーになるため）ので、data-itemは常に
+        // 空文字にして共通の辞書として扱う（applyOcrCellCorrectionForItem参照）。
+        if (def.col === 'K' || def.col === 'L' || def.col === 'M' || def.col === 'N') {
+          const editFieldMap = { K: 'item', L: 'size', M: 'description', N: 'qty' };
+          const field = editFieldMap[def.col];
+          const itemScope = def.col === 'K' ? '' : r.item;
+          const dictFixed = dictFixedMap.get(def.col);
+          const isInheritedItemCell = def.col === 'K' && r.itemInherited;
+          const bgStyle = isInheritedItemCell
+            ? 'background:#F1E6FA; outline:2px dashed #6A3AA0; outline-offset:-2px;'
+            : (lowConfCols.has(def.col)
+              ? 'background:#FDECEC; outline:2px solid #D9534F; outline-offset:-2px;'
+              : (warnCols.has(def.col)
+                  ? 'background:#FFF6E5; outline:2px dashed #E8890C; outline-offset:-2px;'
+                  : (autoFixedCols.has(def.col) ? 'background:#E3F3E3;' : '')));
+          const dictStyle = dictFixed ? 'color:#C0392B; font-weight:700;' : '';
+          const title = isInheritedItemCell
+            ? `この品目名はこの行自体からは読み取れず、近くの行（読み取れた表記：「${escapeHtml(r.itemInheritedFromRaw || '')}」）から引き継いだ推定値です。品目ラベルが複数行にまたがる結合セルのテンプレートで起きやすく、実際の品目と異なる場合があります。図面と見比べてご確認ください。`
+            : (dictFixed
+              ? `マイ辞書により自動修正されました：${escapeHtml(dictFixed.from)} → ${escapeHtml(dictFixed.to)}（誤りの場合はここをクリックして直接修正してください）`
+              : 'クリックして直接修正できます（修正内容はマイ辞書に保存され、次回から自動反映されます）');
+          return `<td class="mono editable-material" contenteditable="true" spellcheck="false"
+              style="${bgStyle}${dictStyle}"
+              data-row-id="${escapeHtml(r.rowId)}" data-field="${field}" data-item="${escapeHtml(itemScope)}"
+              title="${title}"
+              >${escapeHtml(columnDisplayValue(def, r))}</td>`;
         }
         const cellStyle = lowConfCols.has(def.col)
           ? ' style="background:#FDECEC; outline:2px solid #D9534F; outline-offset:-2px;"'
@@ -4467,6 +5140,12 @@ function renderPreview() {
   }
 
   previewWrap.innerHTML = html;
+  // v36で追加：再描画後にスクロール位置を復元する。
+  const newScrollBox = document.getElementById('previewScrollBox');
+  if (newScrollBox) {
+    newScrollBox.scrollTop = prevScrollTop;
+    newScrollBox.scrollLeft = prevScrollLeft;
+  }
 }
 
 function escapeHtml(s) {
@@ -5069,6 +5748,187 @@ btnCopy.addEventListener('click', async () => {
   copyStatus.textContent = `コピーしました（${rowCount}行）。Excelのセルに貼り付けてください。`;
 });
 
+// ============================================================
+// v34/v35で追加：マイ辞書（OCRセル修正辞書）の一覧・削除・書き出し／読み込みモーダル
+// ============================================================
+// プレビュー表でサイズ／材質／数量を直接編集して覚えさせた内容を一覧表示する。
+// 「実際に自動反映された実績がある（usageCount>0）」エントリは青字にし、
+// 「一度も自動反映されたことは無いが登録だけはされている」エントリと見分けが
+// つくようにする（青字＝実際にこの内容で図面が書き換わっているので要注意、という目印）。
+// v35で追加：「このソフトに保存できるように」という要望に対応し、組み込み辞書
+// （EMBEDDED_OCR_CELL_CORRECTIONS）＋ローカル辞書（localStorage）の合算内容を表示し、
+// DESC_VOCABと同じ「書き出し（このPCで追加した分のみ）／読み込み（マージ）／
+// クリア（このPCで追加した分のみ）」を行えるようにする。
+function updateMyDictStatus() {
+  const el = document.getElementById('myDictStatus');
+  if (!el) return;
+  const embeddedCount = Object.keys(EMBEDDED_OCR_CELL_CORRECTIONS).length;
+  const localData = loadOcrCellCorrectionsLocal();
+  const localCount = Object.keys(localData).length;
+  const totalCount = Object.keys(loadOcrCellCorrectionsCombined()).length;
+  el.textContent = totalCount
+    ? `辞書 ${totalCount}件（組み込み${embeddedCount}件＋このPCで追加${localCount}件）`
+    : '';
+}
+function renderMyDictModal() {
+  const body = document.getElementById('myDictBody');
+  if (!body) return;
+  updateMyDictStatus();
+  const data = loadOcrCellCorrectionsCombined();
+  const entries = Object.values(data).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  const fieldLabel = { size: 'サイズ', description: '材質', qty: '数量' };
+  if (!entries.length) {
+    body.innerHTML = '<div class="empty">プレビュー表での直接修正はまだ登録されていません。プレビュー表のサイズ・材質・数量欄をクリックして修正すると、ここに記録されます。</div>';
+    return;
+  }
+  // v36で追加：パネルが右側に常設されるようになったため、幅を確保しにくい。
+  // 「誤読」「修正後」は横並びの2列ではなく、それぞれ独立した行内セルとして
+  // 縦に並べ、どちらもこのパネル内で直接クリックして書き換えられるようにする。
+  body.innerHTML = `<table style="width:100%; font-size:12.5px;"><thead><tr>
+      <th style="text-align:left;">品目／欄</th>
+      <th style="text-align:left;">誤読→修正後</th>
+      <th></th>
+    </tr></thead><tbody>
+    ${entries.map(en => {
+      const usedRecently = (en.usageCount || 0) > 0;
+      const note = usedRecently
+        ? `<span style="color:#2A5DB0; font-weight:600;" title="この内容で実際に図面のデータが自動的に書き換えられています。誤りが無いかご確認ください。">⚠ 自動反映${en.usageCount}件</span>`
+        : '<span style="color:#9aa4ad;">未使用</span>';
+      return `<tr>
+        <td class="mono" style="vertical-align:top; white-space:nowrap;">${escapeHtml(en.item || '（品目なし）')}<br><span style="color:#8a95a0;">${escapeHtml(fieldLabel[en.field] || en.field)}</span></td>
+        <td class="mono" style="vertical-align:top;">
+          <div class="mydict-editable" contenteditable="true" spellcheck="false"
+              data-field="${escapeHtml(en.field)}" data-item="${escapeHtml(en.item)}" data-part="wrong" data-orig-wrong="${escapeHtml(en.wrong)}"
+              style="border-bottom:1px dashed #C7D0D8; padding:1px 2px; margin-bottom:2px;"
+              title="誤読文字列。クリックして修正できます">${escapeHtml(en.wrong)}</div>
+          <div style="text-align:center; color:#9aa4ad; font-size:11px;">↓</div>
+          <div class="mydict-editable" contenteditable="true" spellcheck="false"
+              data-field="${escapeHtml(en.field)}" data-item="${escapeHtml(en.item)}" data-part="to" data-orig-wrong="${escapeHtml(en.wrong)}"
+              style="border-bottom:1px dashed #C7D0D8; padding:1px 2px;"
+              title="修正後の文字列。クリックして修正できます">${escapeHtml(en.to)}</div>
+          <div style="margin-top:3px;">${note}</div>
+        </td>
+        <td style="vertical-align:top;"><button type="button" class="ghost btnDeleteMyDictEntry" data-field="${escapeHtml(en.field)}" data-item="${escapeHtml(en.item)}" data-wrong="${escapeHtml(en.wrong)}" style="font-size:11px; padding:3px 8px;">削除</button></td>
+      </tr>`;
+    }).join('')}
+    </tbody></table>
+    <div style="margin-top:8px; font-size:11.5px; color:#5a6570;">
+      青字＝実際に自動反映された実績がある項目です。念のため該当箇所を再度ご確認ください。
+    </div>`;
+}
+// v36で追加：「誤読」欄・「修正後」欄を書き換えた時、実際の辞書エントリを更新する。
+// 「誤読」を書き換えた場合はキー（品目＋欄＋誤読文字列）自体が変わるため、古いキーを
+// 削除して新しいキーで登録し直す（自動反映された回数(usageCount)は引き継ぐ）。
+function updateOcrCellCorrectionEntry(field, item, origWrongText, newWrongText, newToText) {
+  if (!field || !newWrongText || !newToText) return;
+  const local = loadOcrCellCorrectionsLocal();
+  const combined = loadOcrCellCorrectionsCombined();
+  const oldKey = ocrCorrectionKey(field, item, origWrongText);
+  const base = local[oldKey] || combined[oldKey] || { field, item: item || '', usageCount: 0, createdAt: Date.now() };
+  if (newWrongText !== origWrongText) delete local[oldKey];
+  const newKey = ocrCorrectionKey(field, item, newWrongText);
+  local[newKey] = { ...base, field, item: item || '', wrong: newWrongText, to: newToText, updatedAt: Date.now() };
+  saveOcrCellCorrectionsLocal(local);
+}
+const myDictPanel = document.getElementById('myDictPanel');
+document.getElementById('btnOpenMyDict').addEventListener('click', () => {
+  renderMyDictModal();
+  myDictPanel.style.transform = 'translateX(0)';
+});
+document.getElementById('btnCloseMyDict').addEventListener('click', () => {
+  myDictPanel.style.transform = 'translateX(100%)';
+});
+document.getElementById('myDictBody').addEventListener('click', (ev) => {
+  const btn = ev.target.closest('.btnDeleteMyDictEntry');
+  if (!btn) return;
+  deleteOcrCellCorrection(btn.dataset.field, btn.dataset.item, btn.dataset.wrong);
+  renderMyDictModal();
+});
+// v36で追加：パネル内で「誤読」「修正後」セルを直接編集した時の保存処理。
+// blurはバブリングしないため、captureフェーズで拾う（他の直接編集欄と同じ作法）。
+document.getElementById('myDictBody').addEventListener('blur', (ev) => {
+  const cell = ev.target.closest && ev.target.closest('.mydict-editable');
+  if (!cell) return;
+  const field = cell.dataset.field;
+  const item = cell.dataset.item;
+  const origWrong = cell.dataset.origWrong;
+  const part = cell.dataset.part; // 'wrong' | 'to'
+  const newText = cell.textContent.trim();
+  if (!newText) { renderMyDictModal(); return; } // 空にする編集は誤操作の可能性が高いため無視する
+  const combined = loadOcrCellCorrectionsCombined();
+  const current = combined[ocrCorrectionKey(field, item, origWrong)];
+  const currentWrong = current ? current.wrong : origWrong;
+  const currentTo = current ? current.to : '';
+  const newWrongText = part === 'wrong' ? newText : currentWrong;
+  const newToText = part === 'to' ? newText : currentTo;
+  if (newWrongText === currentWrong && newToText === currentTo) { renderMyDictModal(); return; } // 変更なし
+  updateOcrCellCorrectionEntry(field, item, origWrong, newWrongText, newToText);
+  renderMyDictModal();
+  if (typeof renderPreview === 'function' && pageData.length) renderPreview(); // プレビュー側の赤字表示にも反映する
+}, true);
+
+
+// v35で追加：マイ辞書の書き出し・読み込み・クリア（DESC_VOCABと同じ考え方）。
+// 「このソフトに保存」＝書き出したJSONの中身をEMBEDDED_OCR_CELL_CORRECTIONSに
+// 貼り付けて配布用ファイルを更新すれば、次に配布するファイルには最初から
+// この内容が組み込まれた状態になる。
+document.getElementById('btnExportMyDict').addEventListener('click', () => {
+  // 書き出すのはこのPCで追加した分のみ。組み込み辞書はファイル自体に既に
+  // 入っているため、書き出しファイルに含める必要がない（ファイルも軽くなる）。
+  const data = loadOcrCellCorrectionsLocal();
+  if (!Object.keys(data).length) {
+    alert('このPCで追加した修正がありません。');
+    return;
+  }
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const stamp = new Date().toISOString().slice(0, 10);
+  a.href = url;
+  a.download = `マイ辞書_OCRセル修正_${stamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
+document.getElementById('btnImportMyDict').addEventListener('click', () => {
+  document.getElementById('myDictFileInput').click();
+});
+document.getElementById('myDictFileInput').addEventListener('change', async (ev) => {
+  const file = ev.target.files && ev.target.files[0];
+  ev.target.value = ''; // 同じファイルを連続で選んだ時も change が発火するようにリセット
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const incoming = JSON.parse(text);
+    if (!incoming || typeof incoming !== 'object') throw new Error('辞書ファイルの形式が正しくありません。');
+    // インポートは「上書き」ではなく「マージ」。同じキーがあれば読み込んだ側の
+    // usageCountの方が大きい場合のみそちらを採用する（実績を消してしまわないため）。
+    const local = loadOcrCellCorrectionsLocal();
+    for (const key of Object.keys(incoming)) {
+      const inc = incoming[key];
+      if (!inc || !inc.field || !inc.wrong || !inc.to) continue;
+      const cur = local[key];
+      if (!cur || (inc.usageCount || 0) > (cur.usageCount || 0)) {
+        local[key] = { ...inc, usageCount: Math.max(inc.usageCount || 0, cur ? (cur.usageCount || 0) : 0) };
+      }
+    }
+    saveOcrCellCorrectionsLocal(local);
+    renderMyDictModal();
+    alert('マイ辞書を読み込みました。');
+  } catch (e) {
+    console.error('マイ辞書の読み込みに失敗しました', e);
+    alert('辞書ファイルの読み込みに失敗しました：' + (e && e.message ? e.message : e));
+  }
+});
+document.getElementById('btnClearMyDict').addEventListener('click', () => {
+  // クリアできるのはこのPCで追加した分のみ（組み込み辞書はツールファイル自体に
+  // 焼き込まれているため、ここでは消えない）。
+  if (!confirm('このPCで追加した修正内容を削除しますか？（ツールに組み込み済みの辞書は残ります）')) return;
+  clearOcrCellCorrectionsLocal();
+  renderMyDictModal();
+});
+updateMyDictStatus();
 
 </script>
 </body>
