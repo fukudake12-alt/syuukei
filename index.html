@@ -4063,6 +4063,13 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
     // 未知品目名がテキストとして印字されているケースも、そのままの表記を品目名として
     // 正しく採用できる）。テキスト帯が無い場合のみ、従来通りOCR結果を辞書と照合する。
     const matchedDef = textBand ? { key: textBand.key } : fuzzyMatchMaterialDef(itemText);
+    // v45で追加：BOLT&NUT行は「MACHINE BOLT&NUT」「STUD BOLT&NUT」のどちらであるかを
+    // 表示上も区別する。テキスト帯が一致した場合はそのラベル（v45の継続語合成により
+    // 「BOLT MACHINE & NUT」等、MACHINE/STUDを含む文字列になっている）から、
+    // テキスト帯が無い場合はOCRで読み取った品目名そのものから判定する。
+    const boltType = (matchedDef && matchedDef.key === 'BOLT&NUT')
+      ? deriveBoltType(textBand ? textBand.label : itemText)
+      : '';
     const { desc: descClean, tag: descTag } = extractSupplyReuseTag(descText, '');
     // v22で追加：OCR ONのときに「支給/転用」が出力されない問題への対策。
     // 従来はDESCRIPTION欄のOCR結果にしか「支給」「転用」「既設転用」の文字を
@@ -4084,7 +4091,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
       description: descClean || descText,
       tag,
       qty: c.qty,
-      boltType: '',
+      boltType,
       readMethod: textBand ? 'OCR(自動検出行/品目名はテキスト抽出)' : 'OCR(自動検出行)',
       sizeFromOcr: !!sizeText,
       descFromOcr: !!(descClean || descText),
@@ -4131,6 +4138,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
         if (d < nearestDist) { nearest = ki; nearestDist = d; }
       }
       row.item = rows[nearest].item;
+      row.boltType = rows[nearest].boltType || ''; // v45で追加：BOLT&NUTのマシン/スタッド種別も一緒に引き継ぐ
       row.itemInherited = true; // プレビューで「結合セルから引き継いだ値」と分かるように印を付ける
       row.itemInheritedFromRaw = rows[nearest].itemRawOcrText; // どの行の何という表記から借用したか（デバッグ・ツールチップ用）
     });
