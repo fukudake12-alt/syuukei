@@ -3912,8 +3912,21 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
   const headerBottomRatioForBand = (activeProfileForBand && activeProfileForBand.headerBottomRatio != null)
     ? activeProfileForBand.headerBottomRatio
     : FIXED_TABLE_HEADER_BOTTOM_RATIO;
-  const tableHeaderBottomY = Object.values(headerCandidates).length
-    ? Math.max(...Object.values(headerCandidates).map(h => h.y + (h.height || 0))) + OCR_PADDING_PT
+  // v46で修正：以前は「ITEM/SIZE/DESCRIPTION/QTYのうち1つでも見つかれば見出し位置として
+  // 採用する」という条件だったため、材料表とは無関係な改訂履歴欄（REV No./DESCRIPTION/
+  // B Y DATE...）にある同名の「DESCRIPTION」を材料表の見出しと誤認識するケースがあった
+  // （実例：材料表自体は画像化されていて文字が一切ないのに、ページ下部の改訂履歴欄の
+  // 「DESCRIPTION」だけを拾ってしまい、見出し位置がページ下部にあると誤判定→走査範囲が
+  // 実際の表から大きく外れる不具合）。
+  // computeMaterialColumns()が列境界(x座標)の算出にSIZE・DESCRIPTION・QTYの3つが揃うことを
+  // 要求しているのと同じ基準に揃え、Y座標の算出でも3つが揃って見つかった場合のみ信用する。
+  // 1つ・2つしか見つからない場合は「材料表の見出しではなく別表の見出し語を誤って拾った」
+  // 可能性が高いとみなし、信頼できないテキスト検出結果より、客先プロファイル（またはテンプレート
+  // 既定値）の比率によるフォールバックを優先する。
+  const hasReliableHeaderCandidates =
+    headerCandidates.SIZE && headerCandidates.DESCRIPTION && headerCandidates.QTY;
+  const tableHeaderBottomY = hasReliableHeaderCandidates
+    ? Math.max(...['SIZE', 'DESCRIPTION', 'QTY'].map(k => headerCandidates[k].y + (headerCandidates[k].height || 0))) + OCR_PADDING_PT
     : viewport.height * headerBottomRatioForBand;
   const colWForBand = bounds.boundSizeDesc - bounds.boundLeft;
   const itemLabelBandLeft = (activeProfileForBand && activeProfileForBand.itemLeftRatio != null)
