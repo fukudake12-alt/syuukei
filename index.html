@@ -2493,6 +2493,25 @@ function extractLineNo(annots, textContent, viewport, ph) {
     candidates.sort((a, b) => a[0] - b[0]); // Y座標が最小＝表示上いちばん上を採用
     return candidates[0][1];
   }
+
+  // v49で追加：タイトル欄の「LINE No.」欄自体には値が入っておらず、代わりに図面本体
+  // （アイソメの各系統）に個別の系統番号（例："150A-W1F-1A/1"）が複数箇所に書かれている
+  // 図面向けのフォールバック。タイトル欄近くに候補が1件も無かった場合に限り、ページ全体
+  // からライン番号らしき注釈を探し、表示上いちばん左上にあるものを代表値として採用する
+  // （どれか1つに決め打ちする必要があるため。複数系統をまとめて集計したい場合は、
+  // 目視でLINE No.欄セルを直接編集して訂正できる）。
+  const wholePageCandidates = [];
+  for (const a of annots) {
+    const contents = getAnnotText(a);
+    if (!contents || !pattern.test(contents)) continue;
+    const d = toDisplayRect(viewport, a.rect || [0, 0, 0, 0]);
+    wholePageCandidates.push([d.y0, d.x0, contents]);
+  }
+  if (wholePageCandidates.length) {
+    // 表示上いちばん上（Y座標最小）を優先し、同じ高さなら左（X座標最小）を優先する。
+    wholePageCandidates.sort((a, b) => (a[0] - b[0]) || (a[1] - b[1]));
+    return wholePageCandidates[0][2];
+  }
   return '';
 }
 
@@ -2542,15 +2561,25 @@ function normalizeBoxedHMark(rawText) {
 }
 
 // textContent内から、指定した文字列（正規化して比較）に一致する項目のページ内座標を探す。
+// v51で修正：以前は条件に一致した最初の1件（textContent.items内の格納順で最初に
+// 見つかったもの）をそのまま採用していたが、この格納順はPDF内部の描画順であって、
+// ページ上の見た目の位置（上下）とは無関係。同じ条件に一致する文字列がページ内の
+// 離れた場所（例：材料表の下にあるタイトル欄の本来の位置と、それより下にある
+// 改訂履歴欄や別の場所）に複数存在する図面では、たまたま格納順で先に出てくる方が
+// 採用されてしまい、本来より大きく下にズレた位置を「タイトル欄の位置」として誤って
+// 使ってしまう不具合があった（実例：材料表OCRの走査範囲がタイトル欄まで大きく
+// 広がり、CLIENT/TITLE欄の内容まで材料表の行として誤って読み取ってしまう）。
+// 一致した候補すべてを集め、そのうち見た目で一番上（Y座標が最小）のものを採用する
+// ように変更する。
 function findLabelPosition(textContent, viewport, matcher) {
+  let best = null;
   for (const it of textContent.items) {
     const s = (it.str || '').trim();
-    if (matcher(s)) {
-      const [vx, vy] = viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
-      return { x: vx, y: vy };
-    }
+    if (!matcher(s)) continue;
+    const [vx, vy] = viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
+    if (!best || vy < best.y) best = { x: vx, y: vy };
   }
-  return null;
+  return best;
 }
 
 // DRAWING No.欄・LINE No.欄のOCR補完を行う。drawingNo・lineNoが既に取得できている
@@ -3425,11 +3454,20 @@ function buildMaterialRowFromCluster(cluster, bounds, band) {
     return p;
   });
   const isPureQtyValue = t => /^[0-9]+(?:\.[0-9]+)?$/.test(normalizeWidthAndSpaces(t || ''));
-  const misclassifiedIntoQty = qtyParts.filter(p => !isPureQtyValue(p[1]));
+  // v49で追加：PIPE行の数量は「本数」ではなく「長さ」のため、数量欄に数字とは別に
+  // 単位「m」（メートル）の注釈が入っていることがある。この「m」は数字ではないため、
+  // 従来の「数量欄に数字以外の文字（BW・SW・t1.5等）が紛れ込んでいたらDESCRIPTION側へ
+  // 回す」という救済ロジックに巻き込まれ、材質欄の末尾に「m」が付いてしまっていた
+  // （さらに、この「m」の注釈自体が図面によっては同じ位置に重複して入っていることが
+  // あり、その場合は「m m」と2つ付いてしまう）。単位の「m」は材質でも数量でもないため、
+  // DESCRIPTION側へは回さず、そのまま除外する。
+  const UNIT_SUFFIX_PATTERN = /^m$/i;
+  const qtyPartsWithoutUnit = qtyParts.filter(p => !UNIT_SUFFIX_PATTERN.test(normalizeWidthAndSpaces(p[1] || '')));
+  const misclassifiedIntoQty = qtyPartsWithoutUnit.filter(p => !isPureQtyValue(p[1]));
   if (misclassifiedIntoQty.length) {
     descParts.push(...misclassifiedIntoQty);
-    qtyParts = qtyParts.filter(p => isPureQtyValue(p[1]));
   }
+  qtyParts = qtyPartsWithoutUnit.filter(p => isPureQtyValue(p[1]));
   // 各列内のセルはX座標順に並べてから連結する（PDF内部の格納順が見た目の並び順と
   // 限らないため、常にX座標でソートしてから連結することで語順の入れ替わりを防ぐ）。
   sizeParts.sort((a, b) => a[0] - b[0]);
@@ -3627,6 +3665,73 @@ function cropForOcr(sourceCanvas, bbox) {
   crop.width = w; crop.height = h;
   crop.getContext('2d').drawImage(sourceCanvas, x0, y0, w, h, 0, 0, w, h);
   return crop;
+}
+
+// v47で追加：表に印刷されている横罫線を画像から直接検出し、行の区切りとして使う。
+// QTY欄の数字検出結果だけを手がかりに行を区切るこれまでの方式は、数字が孤立した
+// 1文字だけで印字されている行（例：DESCRIPTION欄が2行にまたがるテンプレートで、
+// 数量の数字だけがその中間にポツンと1つ印字されている行）で、OCRの文字検出処理
+// 自体がその孤立した数字を見落としてしまい、行ごと丸ごと消えてしまう不具合の原因に
+// なっていた（実例：マシンBOLT&NUTのM12×50L行の「8」が検出漏れし、隣のM16×55L行
+// と文字が混ざって誤読される）。
+// 罫線が印刷されている図面であれば、数字の検出結果に一切頼らず、線そのものの位置
+// から正しく行を区切れる。罫線が薄い・存在しないテンプレートでは十分な本数の罫線が
+// 見つからずnullを返すので、呼び出し側は必ず以前からの数字ベースの方式を
+// フォールバックとして用意すること。
+function detectGridLineBands(pageCanvas, viewport, xLeftPt, xRightPt, yTopPt, yBottomPt) {
+  try {
+    const px0 = Math.max(0, Math.round(xLeftPt * OCR_SCALE));
+    const px1 = Math.min(pageCanvas.width, Math.round(xRightPt * OCR_SCALE));
+    const py0 = Math.max(0, Math.round(yTopPt * OCR_SCALE));
+    const py1 = Math.min(pageCanvas.height, Math.round(yBottomPt * OCR_SCALE));
+    const w = px1 - px0, h = py1 - py0;
+    if (w <= 0 || h <= 0) return null;
+    const imgData = pageCanvas.getContext('2d').getImageData(px0, py0, w, h).data;
+    const DARK_LUMINANCE_THRESHOLD = 150; // これ未満の輝度は「黒い」とみなす
+    const LINE_DARK_RATIO_THRESHOLD = 0.5; // 横幅に対しこの割合以上が黒ければ罫線とみなす
+    const isDarkRow = new Array(h);
+    for (let y = 0; y < h; y++) {
+      let darkCount = 0;
+      const rowOffset = y * w * 4;
+      for (let x = 0; x < w; x++) {
+        const i = rowOffset + x * 4;
+        const lum = 0.299 * imgData[i] + 0.587 * imgData[i + 1] + 0.114 * imgData[i + 2];
+        if (lum < DARK_LUMINANCE_THRESHOLD) darkCount++;
+      }
+      isDarkRow[y] = (darkCount / w) >= LINE_DARK_RATIO_THRESHOLD;
+    }
+    // 連続する「黒い行」をまとめて1本の罫線とみなし、その中心Y座標をページ座標
+    // （pt）に変換する。
+    const lineCentersLocal = [];
+    let runStart = -1;
+    for (let y = 0; y <= h; y++) {
+      const dark = y < h && isDarkRow[y];
+      if (dark && runStart === -1) runStart = y;
+      if (!dark && runStart !== -1) {
+        lineCentersLocal.push((runStart + y - 1) / 2);
+        runStart = -1;
+      }
+    }
+    if (lineCentersLocal.length < 3) return null; // 少なくとも2行分（罫線3本）は無いと信頼できない
+    const MIN_LINE_GAP_PT = 3; // pt。これ未満の間隔の線は同一の線とみなして統合する
+    const linesPt = [];
+    for (const localY of lineCentersLocal) {
+      const pt = (py0 + localY) / OCR_SCALE;
+      if (linesPt.length && pt - linesPt[linesPt.length - 1] < MIN_LINE_GAP_PT) continue;
+      linesPt.push(pt);
+    }
+    if (linesPt.length < 3) return null;
+    const MIN_BAND_HEIGHT_PT = 5; // pt。これより狭い帯はノイズとみなして除外する
+    const bands = [];
+    for (let i = 0; i < linesPt.length - 1; i++) {
+      const y0 = linesPt[i], y1 = linesPt[i + 1];
+      if (y1 - y0 < MIN_BAND_HEIGHT_PT) continue;
+      bands.push({ y0, y1 });
+    }
+    return bands.length >= 2 ? bands : null;
+  } catch (e) {
+    return null; // getImageData失敗等。呼び出し側でフォールバックする
+  }
 }
 
 // AutoCADの制御コード（%%C等）はOCRでは復元できないため、OCR結果に対しても
@@ -3971,71 +4076,94 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
   // 逆算箇所（候補行のY座標を求める処理）から参照できず、逆算がズレる不具合が
   // あった。関数スコープに引き上げ、両方から同じ値を使えるようにする。
   const QTY_SCAN_TOP_EXTRA_MARGIN = 8; // pt
-  let qtyLines;
-  try {
-    const qtyCrop = cropForOcr(pageCanvas, {
-      x0: bounds.boundDescQty, x1: bounds.boundQtyEnd,
-      y0: Math.max(0, tableHeaderBottomY - QTY_SCAN_TOP_EXTRA_MARGIN), y1: scanBottom
-    });
-    qtyLines = await withTimeout(recognizeCropDetailed(qtyCrop), 30000, 'OCR認識（QTY列スキャン）');
-  } catch (e) {
-    logOcrIssue('QTY列スキャン(QTY列OCR)', e);
-    return [];
-  }
 
-  const candidates = [];
-  for (const line of qtyLines) {
-    // v44で修正：以前はこの行の最初の数字だけを見ていたため、boundDescQtyの誤差で
-    // DESCRIPTION欄末尾の数字（材質仕様の"304"等）がQTY欄側に混入していた場合、
-    // 本来のQTY値より先にそちらを拾ってしまっていた。cleanOcrQty()と同じ考え方
-    // （QTY欄はどんな混入があっても本来の値が一番右に来るため、最後に見つかった
-    // 数字を採用する）に統一する。
-    const nums = normalizeWidthAndSpaces(line.text).match(QTY_NUMERIC_PATTERN);
-    if (!nums || !nums.length) continue; // 数字らしくない行（かすれ・罫線の誤認識等）は無視する
-    const centerLocalY = (line.y0 + line.y1) / 2;
-    // v44で修正：QTY列走査の切り出し開始位置(y0)にQTY_SCAN_TOP_EXTRA_MARGIN分の
-    // 上方向オフセットを追加したにもかかわらず、ここでページ座標へ逆算する式に
-    // その分を反映し忘れていた。その結果、検出される全行のY座標が実際より
-    // QTY_SCAN_TOP_EXTRA_MARGIN(8pt)分だけ下にズレて計算され、行の高さ(約14pt)に
-    // 対してこのズレが無視できない大きさだったため、SIZE/DESCRIPTION欄の切り出し
-    // 範囲が実際の行から1行分近くズレて隣の行の内容を拾ってしまう不具合の
-    // 主因になっていた（例：PIPEの80A行の内容が読めず、40A行に文字が漏れて見える）。
-    const pageY = (tableHeaderBottomY - QTY_SCAN_TOP_EXTRA_MARGIN) - OCR_PADDING_PT + centerLocalY / OCR_SCALE;
-    candidates.push({ qty: nums[nums.length - 1], y: pageY });
-  }
-  if (!candidates.length) return [];
+  // v47で追加：行の区切り方は「罫線検出」を優先し、罫線が十分に見つからない
+  // テンプレートでのみ、従来からの「QTY欄の数字を手がかりに区切る」方式へ
+  // フォールバックする。
+  // rowBands: { bandY0, bandY1, qty, qtyY }[]
+  let rowBands = [];
+  const gridBands = detectGridLineBands(pageCanvas, viewport, itemLabelBandLeft, bounds.boundQtyEnd, tableHeaderBottomY, scanBottom);
+  if (gridBands) {
+    // 罫線ベース：行ごとにQTY欄だけを個別に小さく切り出してOCRする。ページ全体を
+    // 1回でOCRする方式では、孤立した1文字の数字（2行書きセルの数量等）が検出漏れ
+    // しやすいため、行を区切ってから読む方が取りこぼしに強い。
+    for (const band of gridBands) {
+      let qty = '';
+      try {
+        const qtyCropSmall = cropForOcr(pageCanvas, { x0: bounds.boundDescQty, x1: bounds.boundQtyEnd, y0: band.y0, y1: band.y1 });
+        const qtyText = normalizeWidthAndSpaces(await recognizeCrop(qtyCropSmall));
+        const nums = qtyText.match(QTY_NUMERIC_PATTERN);
+        if (nums && nums.length) qty = nums[nums.length - 1];
+      } catch (e) { /* この行の数量が読めなくても他の項目は出力を試みる */ }
+      rowBands.push({ bandY0: band.y0, bandY1: band.y1, qty, qtyY: (band.y0 + band.y1) / 2 });
+    }
+  } else {
+    // フォールバック：罫線が検出できないテンプレート（罫線が薄い・存在しない等）
+    // では、従来通りQTY列全体を1回でOCRし、検出できた数字を手がかりに行を区切る。
+    let qtyLines;
+    try {
+      const qtyCrop = cropForOcr(pageCanvas, {
+        x0: bounds.boundDescQty, x1: bounds.boundQtyEnd,
+        y0: Math.max(0, tableHeaderBottomY - QTY_SCAN_TOP_EXTRA_MARGIN), y1: scanBottom
+      });
+      qtyLines = await withTimeout(recognizeCropDetailed(qtyCrop), 30000, 'OCR認識（QTY列スキャン）');
+    } catch (e) {
+      logOcrIssue('QTY列スキャン(QTY列OCR)', e);
+      return [];
+    }
 
-  // 1つの数字が複数の断片として検出されることがあるため、近いY座標同士は1行にまとめる。
-  candidates.sort((a, b) => a.y - b.y);
-  const merged = [];
-  const Y_MERGE_TOLERANCE = 6; // pt
-  for (const c of candidates) {
-    const last = merged[merged.length - 1];
-    if (last && Math.abs(c.y - last.y) <= Y_MERGE_TOLERANCE) continue; // 直前の行に統合（最初の値を採用）
-    merged.push(c);
+    const candidates = [];
+    for (const line of qtyLines) {
+      // v44で修正：以前はこの行の最初の数字だけを見ていたため、boundDescQtyの誤差で
+      // DESCRIPTION欄末尾の数字（材質仕様の"304"等）がQTY欄側に混入していた場合、
+      // 本来のQTY値より先にそちらを拾ってしまっていた。cleanOcrQty()と同じ考え方
+      // （QTY欄はどんな混入があっても本来の値が一番右に来るため、最後に見つかった
+      // 数字を採用する）に統一する。
+      const nums = normalizeWidthAndSpaces(line.text).match(QTY_NUMERIC_PATTERN);
+      if (!nums || !nums.length) continue; // 数字らしくない行（かすれ・罫線の誤認識等）は無視する
+      const centerLocalY = (line.y0 + line.y1) / 2;
+      const pageY = (tableHeaderBottomY - QTY_SCAN_TOP_EXTRA_MARGIN) - OCR_PADDING_PT + centerLocalY / OCR_SCALE;
+      candidates.push({ qty: nums[nums.length - 1], y: pageY });
+    }
+    if (!candidates.length) return [];
+
+    // 1つの数字が複数の断片として検出されることがあるため、近いY座標同士は1行にまとめる。
+    candidates.sort((a, b) => a.y - b.y);
+    const merged = [];
+    const Y_MERGE_TOLERANCE = 6; // pt
+    for (const c of candidates) {
+      const last = merged[merged.length - 1];
+      if (last && Math.abs(c.y - last.y) <= Y_MERGE_TOLERANCE) continue; // 直前の行に統合（最初の値を採用）
+      merged.push(c);
+    }
+
+    // v18で変更：以前は上下とも固定6pt（帯の高さ12pt）で切り出していたが、これは
+    // 印刷時の版ズレ（文字が本来の行位置から1〜2pt程度ズレて印字される）に弱く、
+    // 行の上端・下端の文字が欠けることがあった。かといって一律に広げると、行間が
+    // 詰まっている箇所（空白行が無く連続している場合）で上下の行の文字を巻き込んで
+    // 誤読する恐れがある。そこで、行ごとに「隣の行との実際の間隔」を見て、間隔が
+    // 広い所（カテゴリ見出し行の直後など）は最大9ptまで余裕を持たせ、間隔が狭い所は
+    // 隣の帯との間に最低2pt空くところまでしか広げない（＝安全な範囲でだけ余裕を増やす）。
+    const ROW_HALF_HEIGHT_MIN = 6; // pt。印刷ズレを吸収する最低限のマージン（変更前の固定値）
+    const ROW_HALF_HEIGHT_MAX = 9; // pt。行間が広くても、これ以上広げる必要は無い（1行分の文字の高さに対して十分）
+    const ROW_BAND_GAP = 2; // pt。隣の行の帯との間に必ず残す隙間
+    for (let rowIdx = 0; rowIdx < merged.length; rowIdx++) {
+      const c = merged[rowIdx];
+      const prevGap = rowIdx > 0 ? c.y - merged[rowIdx - 1].y : Infinity;
+      const nextGap = rowIdx < merged.length - 1 ? merged[rowIdx + 1].y - c.y : Infinity;
+      const minGap = Math.min(prevGap, nextGap);
+      const rowHalfHeight = Number.isFinite(minGap)
+        ? Math.max(ROW_HALF_HEIGHT_MIN, Math.min(ROW_HALF_HEIGHT_MAX, minGap / 2 - ROW_BAND_GAP))
+        : ROW_HALF_HEIGHT_MAX; // 最初/最後の行等、片側に比較対象が無い場合は上限いっぱいまで許容
+      rowBands.push({ bandY0: c.y - rowHalfHeight, bandY1: c.y + rowHalfHeight, qty: c.qty, qtyY: c.y });
+    }
   }
+  if (!rowBands.length) return [];
 
   const rows = [];
-  // v18で変更：以前は上下とも固定6pt（帯の高さ12pt）で切り出していたが、これは
-  // 印刷時の版ズレ（文字が本来の行位置から1〜2pt程度ズレて印字される）に弱く、
-  // 行の上端・下端の文字が欠けることがあった。かといって一律に広げると、行間が
-  // 詰まっている箇所（空白行が無く連続している場合）で上下の行の文字を巻き込んで
-  // 誤読する恐れがある。そこで、行ごとに「隣の行との実際の間隔」を見て、間隔が
-  // 広い所（カテゴリ見出し行の直後など）は最大9ptまで余裕を持たせ、間隔が狭い所は
-  // 隣の帯との間に最低2pt空くところまでしか広げない（＝安全な範囲でだけ余裕を増やす）。
-  const ROW_HALF_HEIGHT_MIN = 6; // pt。印刷ズレを吸収する最低限のマージン（変更前の固定値）
-  const ROW_HALF_HEIGHT_MAX = 9; // pt。行間が広くても、これ以上広げる必要は無い（1行分の文字の高さに対して十分）
-  const ROW_BAND_GAP = 2; // pt。隣の行の帯との間に必ず残す隙間
-  for (let rowIdx = 0; rowIdx < merged.length; rowIdx++) {
-    const c = merged[rowIdx];
-    const prevGap = rowIdx > 0 ? c.y - merged[rowIdx - 1].y : Infinity;
-    const nextGap = rowIdx < merged.length - 1 ? merged[rowIdx + 1].y - c.y : Infinity;
-    const minGap = Math.min(prevGap, nextGap);
-    const rowHalfHeight = Number.isFinite(minGap)
-      ? Math.max(ROW_HALF_HEIGHT_MIN, Math.min(ROW_HALF_HEIGHT_MAX, minGap / 2 - ROW_BAND_GAP))
-      : ROW_HALF_HEIGHT_MAX; // 最初/最後の行等、片側に比較対象が無い場合は上限いっぱいまで許容
-    const bandY0 = c.y - rowHalfHeight;
-    const bandY1 = c.y + rowHalfHeight;
+  for (const band of rowBands) {
+    const bandY0 = band.bandY0;
+    const bandY1 = band.bandY1;
     let itemText = '', sizeText = '', descText = '';
     let rawSizeDescForDebug = ''; // v43: デバッグ用に、分割前のOCR生結果を保持しておく
     // v41で追加：まずテキストベースの品目ラベル帯（collectTextBasedItemBands）でこのQTY行の
@@ -4045,7 +4173,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
     // 一致すればOCR画像認識は行わず、この結果をそのまま採用する（誤読の余地が無いテキスト
     // 情報を優先する）。一致しなかった場合（＝品目ラベルが本当にテキストとして存在しない
     // 図面）のみ、従来通りITEM欄を画像としてOCR認識する。
-    const textBand = textItemBands.find(b => c.y >= b.y0 && c.y < b.y1);
+    const textBand = textItemBands.find(b => band.qtyY >= b.y0 && band.qtyY < b.y1);
     if (textBand) {
       itemText = textBand.label;
     } else {
@@ -4053,6 +4181,25 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
         const itemCrop = cropForOcr(pageCanvas, { x0: itemLabelBandLeft, x1: bounds.boundLeft, y0: bandY0, y1: bandY1 });
         itemText = stripHeaderLeak(normalizeWidthAndSpaces(await recognizeCrop(itemCrop)));
       } catch (e) { /* 品目名が読めなくても他の項目は出力を試みる */ }
+      // v52で追加：罫線ベースの行区切り（v48）は1行分ぴったりの帯でITEM欄を切り出すため、
+      // 品目ラベルが2行にまたがるセルの真ん中あたりに印字されている場合（例：FLANGEの
+      // 50A行・15A行のちょうど中間にラベルがある等）、どちらの1行分の帯にもラベルの
+      // 文字がちょうどよくかからず、ITEM欄OCRが空振りすることがあった。この状態のまま
+      // 「引き継ぎ」に頼ると、直前の別の品目名（例：90°ELBOW）が誤って引き継がれて
+      // しまう（実例：FLANGEのデータ行が「90°ELBOW」として集計される不具合）。
+      // そこで、通常の1行分の範囲で空振りした場合に限り、上下に半行分ずつ広げた範囲で
+      // 再度OCRを試みる。これで2行にまたがるラベルの少なくとも一部を拾えるようになる。
+      if (!hasMeaningfulChars(itemText)) {
+        try {
+          const halfRow = (bandY1 - bandY0) / 2;
+          const widerItemCrop = cropForOcr(pageCanvas, {
+            x0: itemLabelBandLeft, x1: bounds.boundLeft,
+            y0: bandY0 - halfRow, y1: bandY1 + halfRow
+          });
+          const widerItemText = stripHeaderLeak(normalizeWidthAndSpaces(await recognizeCrop(widerItemCrop)));
+          if (hasMeaningfulChars(widerItemText)) itemText = widerItemText;
+        } catch (e) { /* それでも読めなければ従来通り引き継ぎに委ねる */ }
+      }
     }
     // v12で変更：SIZEとDESCRIPTIONの間には印刷された罫線が無く、実際の区切り位置は
     // 品目ごとに左右へズレる（例：SIZE欄が短い行と長い行が混在）。固定のX座標で
@@ -4098,12 +4245,22 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
       else if (/支給/.test(itemText)) tag = '支給品';
     }
 
+    // v48で追加：罫線ベースの行区切りでは、表内の「まだ何も印字されていない予備の
+    // 空白行」も1つの帯として扱われる。QTY欄の数字を手がかりに区切っていた従来方式
+    // では、そもそも数字が無い空白行は帯自体が作られなかったため問題にならなかったが、
+    // 罫線ベースでは全ての帯に行が作られるため、このままだと「品目名だけ入っていて
+    // サイズ・材質・数量が全部空」の行が大量に出力されてしまう（品目名は、結合セルの
+    // 引き継ぎ処理やテキスト帯により、空白行にも入ってしまうため）。
+    // サイズ・材質・数量が3つとも空の行は、実データが無い予備行とみなし出力しない。
+    const hasAnyData = !!band.qty || !!sizeText || hasMeaningfulChars(descClean || descText);
+    if (!hasAnyData) continue;
+
     rows.push({
       item: matchedDef ? matchedDef.key : (itemText || '(品目未検出)'),
       size: sizeText,
       description: descClean || descText,
       tag,
-      qty: c.qty,
+      qty: band.qty,
       boltType,
       readMethod: textBand ? 'OCR(自動検出行/品目名はテキスト抽出)' : 'OCR(自動検出行)',
       sizeFromOcr: !!sizeText,
@@ -4119,7 +4276,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
       // v43で追加：SIZE/DESCRIPTION分割前のOCR生結果と、この行の切り出し範囲(Y座標)。
       // 隣接する行の文字が混ざる／途中で切れるといった不具合の切り分け用。
       rawSizeDescOcrText: rawSizeDescForDebug,
-      debugQtyY: c.y,
+      debugQtyY: band.qtyY,
       debugBandY0: bandY0,
       debugBandY1: bandY1
     });
