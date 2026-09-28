@@ -511,7 +511,49 @@ previewWrap.addEventListener('click', (ev) => {
 // 「はい／いいえ」で確認できるようにする。「いいえ」を選んだ場合も、今回編集したセルの
 // 値そのものは反映する（辞書への学習だけをしない）。
 function confirmSaveToDict(fromText, toText) {
-  return window.confirm(`この修正をマイ辞書に保存しますか？\n「${fromText}」→「${toText}」\n\n「はい」：次回から同じ誤りを自動修正します\n「いいえ」：今回のセルだけ修正し、辞書には保存しません`);
+  // v61で変更：window.confirm()はボタン名を「OK／キャンセル」から変更できず、文面の
+  // 「はい／いいえ」と食い違っていたため、専用のダイアログに置き換える。
+  // 戻り値（Promise）：'yes'＝辞書に保存して反映／'no'＝今回のセルだけ反映（辞書には保存しない）
+  //                   ／'cancel'＝修正自体を取り消して元の値に戻す
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(20,30,40,.45);z-index:100000;display:flex;align-items:center;justify-content:center;';
+    const box = document.createElement('div');
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-modal', 'true');
+    box.style.cssText = 'background:#fff;border-radius:10px;padding:20px 24px;width:min(460px,92vw);box-shadow:0 8px 30px rgba(0,0,0,.3);font-size:14px;color:#26313d;';
+    const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    box.innerHTML =
+      '<div style="font-weight:700;margin-bottom:10px;">この修正をマイ辞書に保存しますか？</div>' +
+      '<div style="margin-bottom:12px;word-break:break-all;">「' + esc(fromText) + '」→「' + esc(toText) + '」</div>' +
+      '<div style="font-size:13px;color:#42505c;line-height:1.7;margin-bottom:16px;">' +
+      '「はい」：次回から同じ誤りを自動修正します<br>' +
+      '「いいえ」：今回のセルだけ修正し、辞書には保存しません<br>' +
+      '「キャンセル」：修正を取り消して元の値に戻します</div>';
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+    const mk = (label, value, primary) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      b.style.cssText = primary ? '' : 'background:transparent;color:#2E6DA4;border:1px solid #2E6DA4;';
+      b.addEventListener('click', () => done(value));
+      return b;
+    };
+    const yesBtn = mk('はい', 'yes', true);
+    btnRow.append(yesBtn, mk('いいえ', 'no', false), mk('キャンセル', 'cancel', false));
+    box.appendChild(btnRow);
+    overlay.appendChild(box);
+    const onKey = ev => { if (ev.key === 'Escape') { ev.preventDefault(); done('cancel'); } };
+    function done(value) {
+      document.removeEventListener('keydown', onKey, true);
+      overlay.remove();
+      resolve(value);
+    }
+    document.addEventListener('keydown', onKey, true);
+    document.body.appendChild(overlay);
+    yesBtn.focus();
+  });
 }
 
 // v27で追加：LINE No./図面番号/適用法規セル（.editable-titleblock）を直接編集した時の処理。
@@ -519,7 +561,7 @@ function confirmSaveToDict(fromText, toText) {
 // 求め、pageData側の該当ページ（該当ページの全行）へまとめて反映する。
 // 編集内容はタイトルブロック専用の補正辞書に記録し、次回以降の同じ誤読を学習する。
 // v37で追加：辞書へ保存するかどうかはconfirmSaveToDict()で都度確認する。
-previewWrap.addEventListener('blur', (ev) => {
+previewWrap.addEventListener('blur', async (ev) => {
   const td = ev.target.closest && ev.target.closest('.editable-titleblock');
   if (!td) return;
   const rowId = td.dataset.rowId;
@@ -537,7 +579,9 @@ previewWrap.addEventListener('blur', (ev) => {
     const oldCode = e.lawCode || 'N';
     const newCode = lawToCode(newDisplayText);
     if (newCode !== oldCode) {
-      if (confirmSaveToDict(lawToText(oldCode), lawToText(newCode))) {
+      const choice = await confirmSaveToDict(lawToText(oldCode), lawToText(newCode));
+      if (choice === 'cancel') { renderPreview(); return; } // 修正を取り消して元の値に戻す
+      if (choice === 'yes') {
         recordTitleBlockCorrection('lawCode', oldCode, newCode);
       }
       e.lawCode = newCode;
@@ -558,7 +602,9 @@ previewWrap.addEventListener('blur', (ev) => {
   if (newDisplayText === oldValue) return; // 変更なし
   if (!newDisplayText) return; // 空にする編集は誤操作の可能性が高いため無視する（renderPreviewで元に戻す）
 
-  if (confirmSaveToDict(oldValue, newDisplayText)) {
+  const choice = await confirmSaveToDict(oldValue, newDisplayText);
+  if (choice === 'cancel') { renderPreview(); return; } // 修正を取り消して元の値に戻す
+  if (choice === 'yes') {
     recordTitleBlockCorrection(field, oldValue, newDisplayText);
   }
   e[field] = newDisplayText;
@@ -578,7 +624,7 @@ previewWrap.addEventListener('blur', (ev) => {
 // v35で追加：ITEM(K)もこのハンドラで拾う。ITEMだけはdata-itemが常に空文字（＝品目名で
 // スコープしない共通辞書）になるようレンダリング側で調整済みのため、このハンドラ自体の
 // 変更は不要（recordOcrCellCorrection('item', '', ...)として保存されるだけ）。
-previewWrap.addEventListener('blur', (ev) => {
+previewWrap.addEventListener('blur', async (ev) => {
   const td = ev.target.closest && ev.target.closest('.editable-material');
   if (!td) return;
   const rowId = td.dataset.rowId;
@@ -595,7 +641,9 @@ previewWrap.addEventListener('blur', (ev) => {
   if (newText === oldValue) { renderPreview(); return; } // 変更なし（表示だけ元に戻す）
   if (!newText) { renderPreview(); return; } // 空にする編集は誤操作の可能性が高いため無視する
 
-  if (confirmSaveToDict(oldValue, newText)) {
+  const choice = await confirmSaveToDict(oldValue, newText);
+  if (choice === 'cancel') { renderPreview(); return; } // 修正を取り消して元の値に戻す
+  if (choice === 'yes') {
     recordOcrCellCorrection(field, item, oldValue, newText);
   }
   m[field] = newText;
@@ -2722,9 +2770,13 @@ const MATERIAL_ROW_DEFS = [
 // こちらも完全一致ではなく「STUD」「MACHINE／マシン」を含むかどうかで判定し、
 // スペースや「&NUT」の有無などの表記ゆれに対応する。
 function deriveBoltType(label) {
-  const t = String(label || '').toUpperCase();
-  if (t.includes('STUD')) return 'スタッド';
-  if (t.includes('MACHINE') || t.includes('マシン')) return 'マシン';
+  // v58で強化：半角カナ(ﾏｼﾝ)はNFKC正規化で全角にそろえ、OCRの誤読(マソン・スタツド等)も許容する。
+  const t = String(label || '').normalize('NFKC').toUpperCase();
+  const isStud = /STU[DO]|スタ[ッツ]?[ドト]/.test(t);
+  const isMachine = /MACH|マ[シソ][ンソ]?/.test(t);
+  if (isStud && !isMachine) return 'スタッド';
+  if (isMachine && !isStud) return 'マシン';
+  if (isStud && isMachine) return 'スタッド'; // 従来動作(STUD優先)を維持
   return '';
 }
 
@@ -3311,6 +3363,13 @@ function normalizeMaterialText(desc) {
 // フランジの表記（JISクラス＋SOP.FF/FF/RF等のフェイス記号＋SUSF304等の材質記号）は、
 // ガスケットのJISクラス＋V#（リング材番号）表記とは排他的なので、これで判別できる。
 const FLANGE_DESC_PATTERN = /^JIS\d+K.*SUSF\d+/i; // 例: JIS10K SOP.FF SUSF304
+// v53で追加：SS400・SFVC・S25C等の炭素鋼フランジ（例: JIS10K SOP FF SS400）にも対応する拡張パターン。
+// OCRはスペースを落として「JIS10KSOPFFSS400」のように読むことがあるため、空白は前提にしない。
+// SUSF以外の材質は、GASKET帯に限った補正には使わない（ガスケットにSUS材質が含まれ得るため）。
+// 代わりに「フランジと無関係な品目（レデューサー・エルボ・TEE・PIPE）の帯にはみ出した行」に限って
+// FLANGEへ補正する。
+const FLANGE_DESC_PATTERN_EXT = /^JIS\d+K.*?(?:SOP|SOH|SO|WN|FF|RF).*?(?:SUSF\d+|SS\d{3}|SFVC\d*|SF\d{3}|S25C|SUS\d{3})/i;
+const FLANGE_MISASSIGNABLE_ITEMS = new Set(['CON.REDUCER', 'ECC.REDUCER', 'TEE', '90°ELBOW', '45°ELBOW', 'PIPE']);
 // 鋼管（PIPE）の規格表記（例：SUS304TP-A 3.0t／SGP／STPG370）。継手の接続表記（BW・SW・SCR'D）は含まない。
 const PIPE_TUBE_DESC_PATTERN = /(?:^|[^A-Za-z])(?:TP(?:[-\s]?[AB])?|SGP|STPG\d*|STPT\d*|STPY\d*|STS\d*)(?![A-Za-z])/i;
 const FITTING_CONNECTION_PATTERN = /(?:^|[^A-Za-z])(?:BW|SW|SCR'?D?)(?![A-Za-z])/i;
@@ -3319,6 +3378,16 @@ function reclassifyBoltGasket(row) {
   const isGasketDesc = !isBoltDesc && GASKET_DESC_PATTERN.test(row.description);
   const isPipeFittingDesc = !isBoltDesc && !isGasketDesc && PIPE_FITTING_DESC_PATTERN.test(row.description) && !/SUSF/i.test(row.description);
   const isFlangeDesc = !isBoltDesc && !isGasketDesc && FLANGE_DESC_PATTERN.test(row.description);
+  // v55で追加：ブラインドフランジの行（JIS10K FF SS400等）がFLANGEとして集計される不具合の補正。
+  // 通常のフランジは「SOP／SOH／SO／WN」等の形式記号を持つが、ブラインドフランジは
+  // 形式記号が無く「JISクラス＋フェイス記号(FF/RF)＋鋼材質」だけで表記される。
+  // ガスケット(V#)・ボルト表記は上で判定済みのため、それ以外でこの形に一致すれば
+  // BLIND FLANGEに直す（品目がFLANGE・ECC.等いずれで確定していても対象）。
+  const descNoSpace = String(row.description || '').replace(/\s+/g, '');
+  if (!isBoltDesc && !isGasketDesc && row.item !== 'BLIND FLANGE' &&
+      /^JIS\d+K[.\-]?(?:FF|RF)[.\-]?(?:SUSF?\d+|SS\d{3}|SFVC\d*|SF\d{3}|S25C)/i.test(descNoSpace)) {
+    return { ...row, item: 'BLIND FLANGE', boltType: '' };
+  }
   if (isBoltDesc && row.item !== 'BOLT&NUT') {
     // ボルト径の頭文字（M=マシンボルト／W=スタッドボルト）からボルト種別も推定する
     const boltType = /^W/.test(row.description) ? 'スタッド' : 'マシン';
@@ -3331,6 +3400,16 @@ function reclassifyBoltGasket(row) {
   // 後半の行がGASKETの帯にはみ出して「品目：GASKET」に誤分類されることがある。
   // SUSF材質記号（ガスケットのV#表記とは排他的）があればFLANGEに補正する。
   if (isFlangeDesc && row.item === 'GASKET') {
+    return { ...row, item: 'FLANGE', boltType: '' };
+  }
+  // v53で追加：フランジ（SS400等含む）の行が、直前の品目ラベル（ECC./CON.等）の帯にはみ出して
+  // 「R ECC.」等の品目名で確定してしまう不具合の補正。ガスケット表記（V#）・ボルト表記でない
+  // JISクラス＋フェイス記号＋鋼材質の行は、フランジ以外の品目に入っていればFLANGEに直す。
+  // v54で修正：品目名がOCRで「R ECC.」（縦書き「REDUCER」の最後の1文字Rが混入）のように
+  // 辞書に無い文字列で確定している行もあるため、既知品目の一覧ではなく
+  // 「FLANGE／BLIND FLANGE以外なら全て」を補正対象にする。
+  if (!isBoltDesc && !isGasketDesc && row.item !== 'FLANGE' && row.item !== 'BLIND FLANGE' &&
+      FLANGE_DESC_PATTERN_EXT.test(String(row.description || '').replace(/\s+/g, ''))) {
     return { ...row, item: 'FLANGE', boltType: '' };
   }
   // TEE等の配管継手はFLANGE（JISクラス＋SUSF材質表記）と品目ラベルの帯位置が近く、
@@ -3728,6 +3807,19 @@ function detectGridLineBands(pageCanvas, viewport, xLeftPt, xRightPt, yTopPt, yB
       if (y1 - y0 < MIN_BAND_HEIGHT_PT) continue;
       bands.push({ y0, y1 });
     }
+    // v60で追加：表の1行目（PIPEの1行目等）が取りこぼされる不具合の対策。
+    // 走査範囲の上端(yTopPt＝見出し文字の下端＋余白)が、見出し行の下罫線（＝1行目の上端の線）
+    // より下に来てしまうと、その線が範囲外になり「1行目の帯」が作られず、1行目のデータ
+    // （例：PIPEの80A）が丸ごと出力から消える。最初に検出できた罫線と走査範囲の上端との間に
+    // 1行分近い隙間があれば、そこに1行目が存在するとみなして帯を補う。
+    if (bands.length >= 2) {
+      const heights = bands.map(b => b.y1 - b.y0).sort((a, b) => a - b);
+      const medianH = heights[Math.floor(heights.length / 2)];
+      const firstBand = bands[0];
+      if (firstBand.y0 - yTopPt >= medianH * 0.5) {
+        bands.unshift({ y0: Math.max(yTopPt, firstBand.y0 - medianH), y1: firstBand.y0 });
+      }
+    }
     return bands.length >= 2 ? bands : null;
   } catch (e) {
     return null; // getImageData失敗等。呼び出し側でフォールバックする
@@ -3862,6 +3954,17 @@ function fuzzyMatchMaterialDef(text) {
   const cleaned = t.replace(/[^A-Za-z0-9ぁ-んァ-ヶ一-龠°.&]/g, '');
   if (cleaned && cleaned !== t) {
     for (const def of MATERIAL_ROW_DEFS) { if (def.test(cleaned)) return def; }
+  }
+  // v54で追加：REDUCERの縦書きラベル（1文字ずつ）の末尾文字が品目ラベル欄OCRに混入し、
+  // 「R ECC.」「R CON.」と読まれるケースの救済（先頭の孤立した1文字を除いて再判定）。
+  // v56で追加：縦書き「ELBOW」の文字（回転して「MO」等に読まれる）が「MO 90°」のように
+  // 90°/45°の前に混入するケースの救済。文字列中に 90° / 45° があればエルボとして扱う
+  // （「90° ロング」「90° ショート」等、後ろに付く文字も許容）。
+  if (/90\s*[°゜˚]/.test(t)) return MATERIAL_ROW_DEFS.find(d => d.key === '90°ELBOW');
+  if (/45\s*[°゜˚]/.test(t)) return MATERIAL_ROW_DEFS.find(d => d.key === '45°ELBOW');
+  const noLead = t.replace(/^[A-Za-z]\s+(?=[A-Za-z]{2,}\.?$)/, '');
+  if (noLead !== t) {
+    for (const def of MATERIAL_ROW_DEFS) { if (def.test(noLead)) return def; }
   }
   return null;
 }
@@ -4082,7 +4185,18 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
   // フォールバックする。
   // rowBands: { bandY0, bandY1, qty, qtyY }[]
   let rowBands = [];
-  const gridBands = detectGridLineBands(pageCanvas, viewport, itemLabelBandLeft, bounds.boundQtyEnd, tableHeaderBottomY, scanBottom);
+  // v62で修正：罫線走査の上端に tableHeaderBottomY をそのまま使うと、見出し文字が
+  // テキストとして存在する図面（例：L-D-T26001-20-201）で1行目が丸ごと落ちる。
+  // tableHeaderBottomY は「見出し文字のY(ベースライン)＋文字高さ＋余白」で、Yが下向きの
+  // 座標系では文字高さ分だけ実際の見出し下端より下（＝1行目の内側）に食い込むため、
+  // 見出し行の下罫線（1行目の上端の線）が走査範囲から外れ、1行目の帯が作られなかった
+  // （実例：PIPEの1行目80Aが出力されない）。見出し文字がテキストで見つかる場合は、
+  // 走査の上端を見出し文字のベースラインまで戻す（罫線は必ずその下にあり、見出し文字自体は
+  // 「横幅の半分以上が黒い行」ではないので罫線として誤検出されない）。
+  const gridScanTopY = hasReliableHeaderCandidates
+    ? Math.max(...['SIZE', 'DESCRIPTION', 'QTY'].map(k => headerCandidates[k].y))
+    : tableHeaderBottomY;
+  const gridBands = detectGridLineBands(pageCanvas, viewport, itemLabelBandLeft, bounds.boundQtyEnd, gridScanTopY, scanBottom);
   if (gridBands) {
     // 罫線ベース：行ごとにQTY欄だけを個別に小さく切り出してOCRする。ページ全体を
     // 1回でOCRする方式では、孤立した1文字の数字（2行書きセルの数量等）が検出漏れ
@@ -4227,9 +4341,31 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
     // 表示上も区別する。テキスト帯が一致した場合はそのラベル（v45の継続語合成により
     // 「BOLT MACHINE & NUT」等、MACHINE/STUDを含む文字列になっている）から、
     // テキスト帯が無い場合はOCRで読み取った品目名そのものから判定する。
-    const boltType = (matchedDef && matchedDef.key === 'BOLT&NUT')
+    let boltType = (matchedDef && matchedDef.key === 'BOLT&NUT')
       ? deriveBoltType(textBand ? textBand.label : itemText)
       : '';
+    // v58で追加：BOLT&NUTなのにラベルからマシン/スタッドが読めなかった場合は、ITEM欄の
+    // 読み取り範囲を上下に1行分ずつ広げて再OCRし、「マシンBOLT」「STUD BOLT」等の
+    // 行を拾い直す。DESCRIPTIONの径表記(M/W)からの推定は、Mのスタッドも存在するため行わない。
+    // 広げても読めなければ空欄のまま（＝誤った種別を付けない）にする。
+    if (matchedDef && matchedDef.key === 'BOLT&NUT' && !boltType && !textBand) {
+      try {
+        const bh = bandY1 - bandY0;
+        const wideCrop = cropForOcr(pageCanvas, { x0: itemLabelBandLeft, x1: bounds.boundLeft, y0: bandY0 - bh, y1: bandY1 + bh });
+        const wideText = normalizeWidthAndSpaces(await recognizeCrop(wideCrop));
+        boltType = deriveBoltType(wideText);
+        if (boltType) itemText = `${itemText} ${wideText}`.trim();
+        // v59で追加：このOCRエンジンは英数字しか読めず、カタカナ（「マシン」）は文字として
+        // 認識されずに落ちる（「マシンBOLT」→「BOLT」、「90°ショート」→「90°」になる）。
+        // 一方「STUD」「MACHINE」は英字なので確実に読める。品目ラベルのバリエーションは
+        // 「マシンBOLT」「MACHINE BOLT」「STUD BOLT」のいずれかなので、ITEM欄を通常範囲・
+        // 広げた範囲の両方で読んでも「STUD」が見当たらないなら、読み落とされたカタカナ
+        // ＝「マシン」と判定する。DESCRIPTIONの径(M/W)は判定に使わない（Mのスタッドがあるため）。
+        if (!boltType && !/STU[DO]|スタ/i.test(`${itemText} ${wideText}`.normalize('NFKC'))) {
+          boltType = 'マシン';
+        }
+      } catch (e) { /* 読めなければ空欄のまま */ }
+    }
     const { desc: descClean, tag: descTag } = extractSupplyReuseTag(descText, '');
     // v22で追加：OCR ONのときに「支給/転用」が出力されない問題への対策。
     // 従来はDESCRIPTION欄のOCR結果にしか「支給」「転用」「既設転用」の文字を
@@ -4252,6 +4388,31 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
     // サイズ・材質・数量が全部空」の行が大量に出力されてしまう（品目名は、結合セルの
     // 引き継ぎ処理やテキスト帯により、空白行にも入ってしまうため）。
     // サイズ・材質・数量が3つとも空の行は、実データが無い予備行とみなし出力しない。
+    // v53で追加：SIZE/DESCRIPTIONは読めているのにQTYだけ空の行は、行の帯が罫線・隣の行と
+    // ずれてQTYの数字が欠けた（または罫線に潰された）可能性が高い。範囲を絞る→上下に広げる
+    // の順でQTY欄だけを再OCRする。広げた範囲は隣の行の数字を拾う恐れがあるため、数字が
+    // ちょうど1つ読めた場合だけ採用し、いずれの場合も「要確認」（QTY低信頼）として印を付ける。
+    let qtyRetried = false;
+    if (!band.qty && (sizeText || hasMeaningfulChars(descClean || descText))) {
+      const bh = band.bandY1 - band.bandY0;
+      const retryRanges = [
+        { y0: band.bandY0 + bh * 0.2, y1: band.bandY1 - bh * 0.2, strict: false },
+        { y0: band.bandY0 - bh * 0.3, y1: band.bandY1 + bh * 0.3, strict: true }
+      ];
+      for (const rg of retryRanges) {
+        try {
+          const crop = cropForOcr(pageCanvas, { x0: bounds.boundDescQty, x1: bounds.boundQtyEnd, y0: rg.y0, y1: rg.y1 });
+          const txt = normalizeWidthAndSpaces(await recognizeCrop(crop));
+          const nums = txt.match(QTY_NUMERIC_PATTERN);
+          if (nums && nums.length && (!rg.strict || nums.length === 1)) {
+            band.qty = nums[nums.length - 1];
+            qtyRetried = true;
+            break;
+          }
+        } catch (e) { /* 再読み取りに失敗しても他の項目は出力する */ }
+      }
+    }
+
     const hasAnyData = !!band.qty || !!sizeText || hasMeaningfulChars(descClean || descText);
     if (!hasAnyData) continue;
 
@@ -4263,6 +4424,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
       qty: band.qty,
       boltType,
       readMethod: textBand ? 'OCR(自動検出行/品目名はテキスト抽出)' : 'OCR(自動検出行)',
+      ...(qtyRetried ? { lowConfidenceFields: ['QTY'] } : {}),
       sizeFromOcr: !!sizeText,
       descFromOcr: !!(descClean || descText),
       itemInherited: false,
@@ -4313,6 +4475,15 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
       row.itemInheritedFromRaw = rows[nearest].itemRawOcrText; // どの行の何という表記から借用したか（デバッグ・ツールチップ用）
     });
   }
+
+  // v53で追加：この自動検出行の経路ではreclassifyBoltGasket()が一度も呼ばれておらず、
+  // 品目ラベルOCRが「R ECC.」等に化けた行（実際はフランジ）がそのまま確定していた。
+  // DESCRIPTIONの表記（JIS10K SOP FF SS400等）から品目を照合し直す。
+  rows.forEach(row => {
+    const before = row.item;
+    Object.assign(row, reclassifyBoltGasket(row));
+    if (row.item !== before) row.itemMatched = true; // 内容から確定した品目なので、引き継ぎ処理の対象外にする
+  });
 
   return rows;
 }
