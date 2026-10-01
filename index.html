@@ -90,6 +90,13 @@
   .badge.warn{ background:#FBDCDC; color:#A0153A; }
   tbody tr.spec-warn-row td{ background:#FFF3F3; }
   td.editable-titleblock{ cursor:text; }
+  /* 全セル編集対応：上記以外の列（A〜E・O〜X・AA・AB）も直接編集できる。 */
+  td.editable-generic{ cursor:text; }
+  td.editable-generic:hover{ background:#F0F6FF; outline:1px dashed #8FB3E8; outline-offset:-1px; }
+  td.editable-generic:focus{ background:#FFFFFF; outline:2px solid #2f6fed; outline-offset:-2px; }
+  td.editable-generic.cell-overridden{ background:#EAF2FF; box-shadow:inset 3px 0 0 #2f6fed; }
+  /* 手入力した後に、その行の元になる値（ITEM・サイズ・数量等）が変わったセル＝古い可能性あり */
+  td.editable-generic.cell-stale{ background:#FFF1DC; outline:2px dashed #E8890C; outline-offset:-2px; }
   /* v36で追加：プレビュー表（.mat-table）専用のスタイル。table-layout:fixedと<colgroup>の
      width指定を組み合わせ、列幅をドラッグで手動変更できるようにする。折り返しの代わりに
      省略記号(…)で切り、必要な列だけ広げて全文を確認できるようにする（他の一覧表には影響しない）。*/
@@ -99,6 +106,7 @@
   }
   /* 編集中のセルだけは全文が見えるよう、その場で折り返し表示に戻す */
   table.mat-table td.editable-titleblock:focus,
+  table.mat-table td.editable-generic:focus,
   table.mat-table td.editable-material:focus{
     white-space:normal; overflow:visible; text-overflow:clip; position:relative; z-index:5; background:#fff;
   }
@@ -329,6 +337,7 @@
     <div class="row" style="margin-top:14px;">
       <button class="green" id="btnExcel" disabled>Excelを出力</button>
       <button class="ghost" id="btnCopy" disabled type="button">プレビューをコピー（Excel貼り付け用）</button>
+      <button class="ghost" id="btnRecalc" disabled type="button" title="ITEM・サイズ・数量などを直した後に、古くなった手入力（橙色の破線のセル）を自動計算値へ戻します">手入力の要確認セルを再計算</button>
       <span class="status" id="saveStatus"></span>
       <span class="status" id="copyStatus"></span>
     </div>
@@ -342,6 +351,7 @@ const btnPickFolder = document.getElementById('btnPickFolder');
 const btnAnalyze  = document.getElementById('btnAnalyze');
 const btnExcel    = document.getElementById('btnExcel');
 const btnCopy     = document.getElementById('btnCopy');
+const btnRecalc   = document.getElementById('btnRecalc');
 const statusText  = document.getElementById('statusText');
 const saveStatus  = document.getElementById('saveStatus');
 const copyStatus  = document.getElementById('copyStatus');
@@ -653,6 +663,67 @@ previewWrap.addEventListener('blur', async (ev) => {
   if (m.__dictFix) delete m.__dictFix[field];
   renderPreview();
 }, true); // blurはバブリングしないため、captureフェーズで拾う
+
+// 古くなった手入力（橙色の破線のセル）だけを自動計算値へ戻して再計算する。
+// 元データが変わっていない手入力（青色のセル）や、自動計算列でない列（A・D・O・P・V）の
+// 手入力は、意図的な入力なのでそのまま残す。
+btnRecalc.addEventListener('click', () => {
+  let cleared = 0;
+  pageData.forEach(e => {
+    (e.materials || []).forEach(m => {
+      if (!m.cellOverrides) return;
+      const sigNow = rowInputSignature(e, m);
+      Object.keys(m.cellOverrides).forEach(col => {
+        const def = COLUMN_DEFS.find(d => d.col === col);
+        if (!def || !def.autoFilled) return;
+        const saved = m.cellOverrideSig && m.cellOverrideSig[col];
+        if (saved !== undefined && saved !== sigNow) {
+          delete m.cellOverrides[col];
+          delete m.cellOverrideSig[col];
+          cleared++;
+        }
+      });
+      if (!Object.keys(m.cellOverrides).length) { delete m.cellOverrides; delete m.cellOverrideSig; }
+    });
+  });
+  renderPreview();
+  alert(cleared ? `古くなった手入力${cleared}セルを、自動計算値に戻しました。` : '古くなった手入力のセルはありません。');
+});
+
+// 全セル編集対応：.editable-generic（A〜E・O〜X・AA・AB列）を編集した時の処理。
+// 値はm.cellOverrides[列記号]に保存する（ITEM/サイズ等のようにマイ辞書へは学習しない）。
+// 自動値と同じ文字列に戻した場合は上書きを解除して自動値に戻す。
+previewWrap.addEventListener('keydown', (ev) => {
+  const td = ev.target.closest && ev.target.closest('.editable-generic');
+  if (!td) return;
+  if (ev.key === 'Enter') { ev.preventDefault(); td.blur(); }
+  else if (ev.key === 'Escape') { ev.preventDefault(); td.dataset.cancel = '1'; td.blur(); }
+}, true);
+previewWrap.addEventListener('blur', (ev) => {
+  const td = ev.target.closest && ev.target.closest('.editable-generic');
+  if (!td) return;
+  const rowId = td.dataset.rowId, col = td.dataset.col;
+  if (!rowId || !col) return;
+  const [pageIdxStr, matIdxStr] = String(rowId).split(':');
+  const e = pageData[parseInt(pageIdxStr, 10)];
+  const m = e && e.materials && e.materials[parseInt(matIdxStr, 10)];
+  if (!m) return;
+  if (td.dataset.cancel === '1') { renderPreview(); return; } // Esc：編集を取り消して元の表示に戻す
+  const newText = td.textContent.replace(/\u00A0/g, ' ').trim();
+  const current = td.dataset.currentValue || '';
+  if (newText === current) return; // 変更なし（再描画も不要）
+  const autoVal = td.dataset.autoValue || '';
+  if (newText === autoVal) {
+    if (m.cellOverrides) { delete m.cellOverrides[col]; if (!Object.keys(m.cellOverrides).length) delete m.cellOverrides; }
+    if (m.cellOverrideSig) delete m.cellOverrideSig[col];
+  } else {
+    if (!m.cellOverrides) m.cellOverrides = {};
+    if (!m.cellOverrideSig) m.cellOverrideSig = {};
+    m.cellOverrides[col] = newText;
+    m.cellOverrideSig[col] = rowInputSignature(e, m); // 入力した時点の元データを記録（後で古くなったか判定する）
+  }
+  renderPreview();
+}, true);
 
 // v36で追加：プレビュー表の列幅をヘッダー右端のハンドルをドラッグして手動変更できるようにする。
 // 幅はpreviewColWidths（メモリ上）に保存し、以降のrenderPreview()の再描画にも引き継がれる
@@ -1391,6 +1462,7 @@ async function runAnalysis(appendMode) {
   btnAnalyzeAppend.disabled = true;
   btnExcel.disabled = true;
   btnCopy.disabled = true;
+  btnRecalc.disabled = true;
   copyStatus.textContent = '';
   progressBar.style.display = 'block';
   progressBar.value = 0;
@@ -1507,6 +1579,7 @@ async function runAnalysis(appendMode) {
     btnAnalyzeAppend.disabled = true;
     btnExcel.disabled = !pageData.length;
     btnCopy.disabled = !pageData.length;
+    btnRecalc.disabled = !pageData.length;
     btnCancelAnalyze.style.display = 'none';
     analysisCancelRequested = false;
   }
@@ -2279,7 +2352,11 @@ async function analyzePage(pdf, pageNum) {
   // （OCRは一切動かない）。
   let materials = [];
   let unreadItems = [];
-  if (isOcrEnabled()) {
+  if (MATERIAL_SKIP_SERIES.includes(series)) {
+    // 親図など、材料表の無い図面：材料表の読み取り（テキスト・OCRとも）を行わない。
+    materials = [];
+    console.info(`[材料表スキップ] page ${pageNum} / DRAWING No. ${drawingNo}（${series}のため材料表は読み取りません）`);
+  } else if (isOcrEnabled()) {
     try {
       materials = await scanQtyColumnForMissingRows(page, textContent, viewport);
       // デバッグ用：PIPE・TEE等、特定の品目だけが出力から漏れる／別の品目名に化ける
@@ -2316,6 +2393,27 @@ async function analyzePage(pdf, pageNum) {
     // OCR経路（enhanceRowsWithOCR）では従来から同じ除外処理をしていたため、こちらも揃える。
     materials = dropEmptyPlaceholderRows(materials, unreadItems);
   }
+
+  // 図面番号が取れないページ（＝図書リスト・一覧表など図面ではないページ）では、
+  // 一覧表の文字が材料表の行と誤認され、ITEMが「;<」のような意味のない文字列の行
+  // （図面番号「(未検出)」・サイズ「3」等）が出力されてしまう。
+  // ※文字化けした文字でもテキスト由来の品目帯としてitemMatched=trueになるため、
+  //   itemMatchedでは判別できない。品目名が既知の品目（MATERIAL_ROW_DEFSのkey）でなく、
+  //   かつ英数字・かな・漢字が3文字未満（＝品目名として成立していない）行だけを除外する。
+  // 本物の図面で図面番号だけ読めなかった場合は、PIPE等の既知品目の行が残るため
+  // 「(未検出)」として表示され、読み取り失敗に気づける（従来の警告機能は維持）。
+  if (!drawingNo && materials.length) {
+    const knownKeys = new Set(MATERIAL_ROW_DEFS.map(d => d.key));
+    const MEANINGFUL_CHAR = /[A-Za-z0-9\u3040-\u30FF\u4E00-\u9FFF]/g;
+    materials = materials.filter(m => {
+      if (knownKeys.has(m.item)) return true;
+      const cnt = (String(m.item || '').match(MEANINGFUL_CHAR) || []).length;
+      return cnt >= 3;
+    });
+  }
+
+  // ボルト行を「サイズ＝◯A用／材質＝M16×55L SS400/SS400」の形にそろえる
+  materials = normalizeBoltRows(materials);
 
   // OCR補完版で追加：OCRが例外で失敗した場合（＝「そもそも記入が無かった」のではなく
   // 「読み取り処理自体がエラーで動かなかった」場合）は、通常の「図書リスト」「材料表なし」
@@ -2431,6 +2529,14 @@ function extractPipeAndGasketClass(lineNo) {
   const insulationSpec = m ? m[1].toUpperCase() : '';
   return { pipeClass, gasketClass, insulationSpec };
 }
+
+// 材料表（ITEM/SIZE/DESCRIPTION/QTY）の読み取り対象外とする図面の種別。
+// 材料表が載っているのはアイソメ図だけで、親図（図面番号の末尾が100〜199番台）には
+// 材料表が無い。親図で読み取りを行うと、ページ内の別の表（設計条件・系統一覧など）の
+// 文字や数字が材料行と誤認され、「(品目未検出)」の意味のない行が大量に出てしまう。
+// ※図面番号が読めなかったページ（図書リスト）と、番号が600番台以上・形式不明のページは、
+//   アイソメ図の番号読み取り失敗の可能性もあるため、対象外にせず従来どおり読み取る。
+const MATERIAL_SKIP_SERIES = ['親図'];
 
 function getDrawingSeries(drawingNo) {
   if (!drawingNo) return '図書リスト';
@@ -2605,7 +2711,12 @@ const LINE_NO_OCR_PATTERN = /[0-9]{1,4}[A-Za-z]{0,4}-[^\r\n]+-[^\r\n]+(?:-[^\r\n
 // extractPipeAndGasketClass()が配管クラス記号の一部として枠内の文字を利用する際も、
 // 誤認識された記号ではなく正しい"H"が使われるようになる。
 function normalizeBoxedHMark(rawText) {
-  return String(rawText || '').replace(/\[[^\]\-/\s]{0,3}\]?/g, '[H]');
+  // v53で追加：枠囲みの「H」が、括弧ではなく四角そのものとして「田」「囲」「回」「⊞」等の1文字に
+  // 誤認識されるケース（例："7田/17"）にも対応する。クラス記号の直前が数字で直後が"/"の
+  // 位置に限定し、通常の文字を巻き込まないようにする。
+  return String(rawText || '')
+    .replace(/(\d)[田囲回日口□▢⊞⊟■](?=\/)/g, '$1[H]')
+    .replace(/\[[^\]\-/\s]{0,3}\]?/g, '[H]');
 }
 
 // textContent内から、指定した文字列（正規化して比較）に一致する項目のページ内座標を探す。
@@ -2640,7 +2751,10 @@ function findLabelPosition(textContent, viewport, matcher) {
 // OCR対象とする（実図面を定規で実測して算出。社内の別テンプレートでは要調整）。
 const FIXED_TITLE_BLOCK_RATIOS = {
   drawingNo: { x0: 0.748, x1: 0.965, y0: 0.925, y1: 0.985 },
-  lineNo:    { x0: 0.808, x1: 0.985, y0: 0.703, y1: 0.775 }
+  // v53で変更：y1を0.775→0.805に拡張（LINE No.欄が2段ある図面で、1段目の下端が切れ2段目が
+  // 枠外になっていた）。枠が広がる分、上側にLG注記等が写り込むが、OCR後にLINE No.の書式に
+  // 一致する行だけを上から順に採用するため影響しない（下のocrTitleBlockFallback参照）。
+  lineNo:    { x0: 0.808, x1: 0.985, y0: 0.703, y1: 0.805 }
 };
 
 async function ocrTitleBlockFallback(page, pageCanvas, textContent, viewport, ph, need) {
@@ -2679,9 +2793,14 @@ async function ocrTitleBlockFallback(page, pageCanvas, textContent, viewport, ph
       // v13で変更：この欄は複数系統が縦に並んで記載されていることがあるため、
       // 全行を連結するrecognizeCrop()ではなく、一番上の1行だけを機械的に選ぶ
       // recognizeCropTopLine()を使う（詳細はrecognizeCropTopLine()のコメント参照）。
-      const rawText = normalizeBoxedHMark(fixAutocadSymbolsForOcr(await withTimeout(recognizeCropTopLine(crop), 30000, 'OCR認識（LINE No.）')));
-      const m = rawText.match(LINE_NO_OCR_PATTERN);
-      if (m) { result.lineNo = m[0]; }
+      // v53で変更：全行を上から順に取得し、LINE No.の書式に一致する最初の行（＝2段ある場合は
+      // 上の段）を採用する。枠内に別欄の行が混ざっていても、書式に合わない行は読み飛ばす。
+      const ocrLines = await withTimeout(recognizeCropLinesTopDown(crop), 30000, 'OCR認識（LINE No.）');
+      for (const line of ocrLines) {
+        const norm = normalizeBoxedHMark(fixAutocadSymbolsForOcr(line));
+        const m = norm.match(LINE_NO_OCR_PATTERN);
+        if (m) { result.lineNo = m[0]; break; }
+      }
     } catch (e) {
       logOcrIssue('LINE No.欄OCR認識', e);
     }
@@ -3373,21 +3492,92 @@ const FLANGE_MISASSIGNABLE_ITEMS = new Set(['CON.REDUCER', 'ECC.REDUCER', 'TEE',
 // 鋼管（PIPE）の規格表記（例：SUS304TP-A 3.0t／SGP／STPG370）。継手の接続表記（BW・SW・SCR'D）は含まない。
 const PIPE_TUBE_DESC_PATTERN = /(?:^|[^A-Za-z])(?:TP(?:[-\s]?[AB])?|SGP|STPG\d*|STPT\d*|STPY\d*|STS\d*)(?![A-Za-z])/i;
 const FITTING_CONNECTION_PATTERN = /(?:^|[^A-Za-z])(?:BW|SW|SCR'?D?)(?![A-Za-z])/i;
+// ---- ボルト行の表記統一：「サイズ＝◯A用／材質＝M16×55L SS400/SS400」の形にそろえる ----
+// 図面によってはボルト行のSIZE欄に「M16×55L」（ボルト寸法）、DESCRIPTION欄に「SS400/SS400」
+// と印字されている。これを、SIZE欄＝対応するフランジの呼び径（例：50A用）、
+// 材質欄＝ボルト寸法＋材質（例：M16×55L SS400/SS400）の形にそろえる。
+// 呼び径は同じ図面のGASKET／FLANGEの行から、JIS10Kのボルト径の対応表で割り出す。
+// JIS10Kのフランジ呼び径 → [ボルト径(M), 1継手あたりのボルト本数]
+const JIS10K_BOLT_TABLE = {
+  10: [12, 4], 15: [12, 4], 20: [12, 4], 25: [16, 4], 32: [16, 4], 40: [16, 4], 50: [16, 4], 65: [16, 4],
+  80: [16, 8], 90: [16, 8], 100: [16, 8], 125: [20, 8], 150: [20, 8], 200: [20, 12], 250: [22, 12], 300: [22, 16]
+};
+// ボルト寸法の表記（先頭のMはOCRで落ちることがあるため省略可）。例：M16×55L／16 × 55L
+const BOLT_SPEC_PATTERN = /^\s*([MＭ]?)\s*(\d{2})\s*[×xX]\s*(\d{2,3})\s*(L?)\s*$/i;
+function normalizeBoltRows(materials) {
+  const list = materials || [];
+  const firstNum = str => {
+    const m = String(str || '').normalize('NFKC').match(/^\s*(\d+)\s*A/i);
+    return m ? parseInt(m[1], 10) : null;
+  };
+  // 同じ図面のガスケット・フランジから、使われている呼び径と（ガスケットの）数量を集める
+  const gasketQty = {};       // 呼び径 → ガスケット数量の合計
+  const flangeSizes = new Set();
+  let nonJis10K = false;
+  list.forEach(r => {
+    const isGasket = r.item === 'GASKET';
+    const isFlange = r.item === 'FLANGE' || r.item === 'BF加工品' || r.item === 'BLIND FLANGE';
+    if (!isGasket && !isFlange) return;
+    const a = firstNum(r.size);
+    if (a == null) return;
+    const jis = String(r.description || '').normalize('NFKC').match(/JIS\s*(\d+)\s*K/i);
+    if (jis && parseInt(jis[1], 10) !== 10) nonJis10K = true; // 10K以外は対応表が異なるため推定しない
+    if (isGasket) gasketQty[a] = (gasketQty[a] || 0) + (parseInt(String(r.qty || '').replace(/\D/g, ''), 10) || 0);
+    else flangeSizes.add(a);
+  });
+  if (nonJis10K) return list;
+  const hasGasket = Object.keys(gasketQty).length > 0;
+  const candidateSizes = hasGasket ? Object.keys(gasketQty).map(Number) : Array.from(flangeSizes);
+  if (!candidateSizes.length) return list;
+
+  return list.map(r => {
+    if (r.item !== 'BOLT&NUT') return r;
+    const sizeStr = String(r.size || '').normalize('NFKC').trim();
+    const descStr = String(r.description || '').normalize('NFKC').trim();
+    if (/A\s*用/.test(sizeStr)) return r; // すでに「◯A用」の形の図面はそのまま
+
+    // ボルト寸法の取得元：SIZE欄が寸法ならそこから、SIZE欄が空でDESCRIPTION欄の先頭が寸法ならそこから
+    let spec = null, restDesc = descStr, fromSize = false;
+    const ms = sizeStr.match(BOLT_SPEC_PATTERN);
+    if (ms) { spec = ms; fromSize = true; }
+    else if (!sizeStr) {
+      const md = descStr.match(/^\s*([MＭ]?)\s*(\d{2})\s*[×xX]\s*(\d{2,3})\s*(L?)\b\s*(.*)$/i);
+      if (md) { spec = md; restDesc = md[5] || ''; }
+    }
+    if (!spec) return r;
+    const dia = parseInt(spec[2], 10), len = spec[3];
+    const boltQty = parseInt(String(r.qty || '').replace(/\D/g, ''), 10) || 0;
+
+    // 候補：ボルト径が一致する呼び径。複数あれば、ボルト数量＝ガスケット数量×本数で絞る。
+    let cands = candidateSizes.filter(a => JIS10K_BOLT_TABLE[a] && JIS10K_BOLT_TABLE[a][0] === dia);
+    if (cands.length > 1 && hasGasket && boltQty) {
+      const byQty = cands.filter(a => gasketQty[a] * JIS10K_BOLT_TABLE[a][1] === boltQty);
+      if (byQty.length === 1) cands = byQty;
+    }
+    if (cands.length !== 1) return r; // 一意に決まらない場合は元の値のまま（誤った呼び径を入れない）
+
+    const boltSpecText = `M${dia}×${len}${/L/i.test(spec[4]) ? 'L' : ''}`;
+    const newDesc = fromSize ? `${boltSpecText} ${restDesc}`.trim() : descStr;
+    return {
+      ...r,
+      size: `${cands[0]}A用`,
+      description: newDesc,
+      boltSizeInferred: true,           // 呼び径を推定して入れた行の目印
+      originalBoltSize: r.size || ''    // 元のSIZE欄の値（確認用）
+    };
+  });
+}
+
+// バルブの型式表記（例：VBS-11、VBS 11、VBS一11）または「弁」を含む記述。
+const VALVE_DESC_PATTERN = /^V[A-Z]{1,3}\s*[-‐−－ー一]?\s*\d+|弁/i;
 function reclassifyBoltGasket(row) {
   const isBoltDesc = BOLT_DESC_PATTERN.test(row.description);
   const isGasketDesc = !isBoltDesc && GASKET_DESC_PATTERN.test(row.description);
   const isPipeFittingDesc = !isBoltDesc && !isGasketDesc && PIPE_FITTING_DESC_PATTERN.test(row.description) && !/SUSF/i.test(row.description);
   const isFlangeDesc = !isBoltDesc && !isGasketDesc && FLANGE_DESC_PATTERN.test(row.description);
-  // v55で追加：ブラインドフランジの行（JIS10K FF SS400等）がFLANGEとして集計される不具合の補正。
-  // 通常のフランジは「SOP／SOH／SO／WN」等の形式記号を持つが、ブラインドフランジは
-  // 形式記号が無く「JISクラス＋フェイス記号(FF/RF)＋鋼材質」だけで表記される。
-  // ガスケット(V#)・ボルト表記は上で判定済みのため、それ以外でこの形に一致すれば
-  // BLIND FLANGEに直す（品目がFLANGE・ECC.等いずれで確定していても対象）。
-  const descNoSpace = String(row.description || '').replace(/\s+/g, '');
-  if (!isBoltDesc && !isGasketDesc && row.item !== 'BLIND FLANGE' &&
-      /^JIS\d+K[.\-]?(?:FF|RF)[.\-]?(?:SUSF?\d+|SS\d{3}|SFVC\d*|SF\d{3}|S25C)/i.test(descNoSpace)) {
-    return { ...row, item: 'BLIND FLANGE', boltType: '' };
-  }
+  // v63で削除：v55で追加していた「JISクラス＋FF/RF＋鋼材質ならBLIND FLANGEに直す」という、
+  // DESCRIPTION(材質)からの品目の推測補正は廃止した。BF加工品の行（JIS10K FF SUSF304 ...）を
+  // BLIND FLANGEに書き換えてしまうため。品目は図面に印字された品目ラベルだけから決める。
   if (isBoltDesc && row.item !== 'BOLT&NUT') {
     // ボルト径の頭文字（M=マシンボルト／W=スタッドボルト）からボルト種別も推定する
     const boltType = /^W/.test(row.description) ? 'スタッド' : 'マシン';
@@ -3395,6 +3585,15 @@ function reclassifyBoltGasket(row) {
   }
   if (isGasketDesc && row.item !== 'GASKET') {
     return { ...row, item: 'GASKET', boltType: '' };
+  }
+  // VALVEの品目ラベルは縦書き（90°回転）＋結合セルで印字されていることが多く、OCRで
+  // 「E」のように末尾1文字しか読めない、または何も読めず近くの別品目（BOSS等）から
+  // 誤って引き継がれてしまうことがある。DESCRIPTIONがバルブ型式（例：VBS-11）や
+  // 「弁」を含む行は、品目が未確定（辞書にない文字列）または引き継ぎ値の場合に限り、
+  // VALVEに補正する。正しく読めている既知の品目ラベルは上書きしない。
+  if (!isBoltDesc && !isGasketDesc && row.item !== 'VALVE' && VALVE_DESC_PATTERN.test(String(row.description || '').trim()) &&
+      (row.itemInherited || !MATERIAL_ROW_DEFS.some(d => d.key === row.item))) {
+    return { ...row, item: 'VALVE', boltType: '', itemInherited: false };
   }
   // FLANGEは品目ラベルの帯位置とデータ行の印字位置が図面によってズレることがあり、
   // 後半の行がGASKETの帯にはみ出して「品目：GASKET」に誤分類されることがある。
@@ -3408,7 +3607,7 @@ function reclassifyBoltGasket(row) {
   // v54で修正：品目名がOCRで「R ECC.」（縦書き「REDUCER」の最後の1文字Rが混入）のように
   // 辞書に無い文字列で確定している行もあるため、既知品目の一覧ではなく
   // 「FLANGE／BLIND FLANGE以外なら全て」を補正対象にする。
-  if (!isBoltDesc && !isGasketDesc && row.item !== 'FLANGE' && row.item !== 'BLIND FLANGE' &&
+  if (!isBoltDesc && !isGasketDesc && row.item !== 'FLANGE' && row.item !== 'BLIND FLANGE' && !/^BF/i.test(String(row.item || '').replace(/\s+/g, '')) &&
       FLANGE_DESC_PATTERN_EXT.test(String(row.description || '').replace(/\s+/g, ''))) {
     return { ...row, item: 'FLANGE', boltType: '' };
   }
@@ -3585,6 +3784,31 @@ function buildMaterialRowFromCluster(cluster, bounds, band) {
   return reclassifyBoltGasket({ item: band.key, size: cleanSize, description, tag, qty: cleanedQty, boltType, descBBox, sizeBBox, qtyBBox, readMethod: 'テキスト' });
 }
 
+// v70で追加：OCR結果の材質欄（DESCRIPTION）から、OCRの誤読による漢字（中国語のような文字）を除く。
+// 【背景】このOCRエンジンは英数字向けで、小さな日本語の注記（例：BF加工品の
+// 「(BOSS内径に合わせ 穴あけ加工)」）を「(术内径合穴加工)」のような別の漢字列に読み違える。
+// ①注記が「内径・穴・加工」のうち2つ以上を含む場合は、本来の定型注記に置き換える。
+// ②それ以外の日本語・漢字は、支給／転用／既設の語だけ残して取り除く。
+// ③「JIS10KFFSS400」のようにつながった規格表記の間に空白を補う。
+function sanitizeOcrDescription(text) {
+  let t = String(text || '').replace(/支给/g, '支給').replace(/转用/g, '転用');
+  const fixSpec = x => x.replace(/^(JIS\d+K)\s*((?:SOP\.?)?\s*(?:FF|RF))\s*(SS\d+|SUSF\d+)/i,
+    (m, a, b, c) => `${a} ${b.replace(/\s+/g, '')} ${c}`);
+  if (!/[\u3040-\u30ff\u3400-\u9fff]/.test(t)) return fixSpec(t.replace(/\s+/g, ' ').trim());
+  const canonical = '(BOSS内径に合わせ 穴あけ加工)';
+  const CAN = '\u0003';
+  t = t.replace(/[\(（][^\)）]*[\)）]?/g, m => {
+    const hits = ['内径', '穴', '加工', '合'].filter(w => m.includes(w)).length;
+    return hits >= 2 ? ' ' + CAN : m;
+  });
+  const kept = [];
+  t = t.replace(/(既設転用|既設使用|支給品|支給|転用|既設)/g, m => { kept.push(m); return `\u0001${kept.length - 1}\u0002`; });
+  t = t.replace(/[\u3040-\u30ff\u3400-\u9fff]/g, '');
+  t = t.replace(CAN, canonical).replace(/\u0001(\d+)\u0002/g, (_, i) => kept[+i]);
+  t = t.replace(/\(\s*\)|（\s*）/g, '');
+  return fixSpec(t.replace(/\s+/g, ' ').trim());
+}
+
 // 仕様(DESCRIPTION)欄・数量(QTY)欄のどちらかに「支給」「転用」「既設転用」「既設使用」の文字が
 // 混じっているケースを検出し、別項目（支給品／転用品／既設転用）として切り出す。
 // 該当欄からは該当の文字列を除去する（QTY欄はこれにより数値のみが残る）。
@@ -3700,6 +3924,18 @@ async function recognizeCropTopLine(crop) {
   return String(sorted[0].text || '').trim();
 }
 
+// v53で追加：LINE No.欄向け。recognizeCropTopLine()は「画像内でいちばん上の行」を無条件に
+// 採用するため、読み取り枠に別の欄（例：LGの注記行）が写り込むと、LINE No.ではない行を
+// 採用して書式判定に失敗し、LINE No.が空欄になっていた。こちらは検出した全行を
+// 上から順（Y座標昇順）に並べて返し、呼び出し側でLINE No.の書式に一致する最初の行
+// ＝「LINE No.として正しい行のうち、いちばん上の段」を選べるようにする。
+async function recognizeCropLinesTopDown(crop) {
+  const dataUrl = crop.toDataURL('image/png');
+  const lines = await window.PPOCR.recognize(dataUrl);
+  const topOf = l => (l.box && l.box.length >= 2) ? Math.min(...l.box.map(p => p[1])) : 0;
+  return lines.slice().sort((a, b) => topOf(a) - topOf(b)).map(l => String(l.text || '').trim()).filter(Boolean);
+}
+
 // v5で追加：QTY列スキャン（帯が1件も作れなかったページ向けフォールバック）専用。
 // 通常のrecognizeCropはテキストだけを返すが、こちらは各行の位置（box、切り出し画像内の
 // ピクセル座標）も一緒に返す。QTY列のどのY座標に数字があるかを特定するために使う。
@@ -3744,6 +3980,195 @@ function cropForOcr(sourceCanvas, bbox) {
   crop.width = w; crop.height = h;
   crop.getContext('2d').drawImage(sourceCanvas, x0, y0, w, h, 0, 0, w, h);
   return crop;
+}
+
+// v65で作り直し（v64の後継）：QTY欄用の切り出し。「数字だけ」を取り出し、余白の広い
+// 白い画像に貼り直してからOCRに渡す。
+// 【背景】BOLT&NUTの数量「8」等は、(1)右上に単位記号の小さな「S」が付く、(2)行の高さ
+// ぴったりに切り出すと隣の行の「S」の下半分が下端に写り込む、(3)数字が太い罫線に
+// 挟まれて小さな画像になる、ためOCRが「8」を読み落とし（空欄）／「00」と誤読していた。
+// v64は「小さな上付き記号を白く塗る」だけで、下端に写り込んだ隣の行の切れ端と罫線が
+// 残っていた。そこで、罫線・上付き記号・切れ端はすべて捨て、数字（と小数点）の塊だけを
+// 数字の高さ分の余白付きで新しい画像に描き直す。
+// 　残すもの：数字の高さの55%以上ある塊（数字）／行の下端付近にある小さな塊（小数点）
+// 　捨てるもの：欄の高さ・幅の90%以上に伸びる塊（罫線）、上下の切り口に接する小さな塊
+// 　　　　　　（隣の行の記号の切れ端）、数字より上に浮いている小さな塊（単位記号S・M等）
+// 数字が見つからない（空欄のセル）場合は元の画像をそのまま返す。
+function cropQtyForOcr(sourceCanvas, bbox) {
+  const crop = cropForOcr(sourceCanvas, bbox);
+  try {
+    const w = crop.width, h = crop.height;
+    const img = crop.getContext('2d').getImageData(0, 0, w, h);
+    const d = img.data;
+    const dark = new Uint8Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      const lum = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+      dark[i] = lum < 160 ? 1 : 0;
+    }
+    const label = new Int32Array(w * h);
+    const comps = [];
+    const stack = [];
+    for (let y0 = 0; y0 < h; y0++) {
+      for (let x0 = 0; x0 < w; x0++) {
+        const start = y0 * w + x0;
+        if (!dark[start] || label[start]) continue;
+        const id = comps.length + 1;
+        const c = { id, minX: x0, maxX: x0, minY: y0, maxY: y0 };
+        stack.push(start); label[start] = id;
+        while (stack.length) {
+          const cur = stack.pop();
+          const cy = (cur / w) | 0, cx = cur - cy * w;
+          if (cx < c.minX) c.minX = cx; if (cx > c.maxX) c.maxX = cx;
+          if (cy < c.minY) c.minY = cy; if (cy > c.maxY) c.maxY = cy;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              const nx = cx + dx, ny = cy + dy;
+              if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+              const ni = ny * w + nx;
+              if (dark[ni] && !label[ni]) { label[ni] = id; stack.push(ni); }
+            }
+          }
+        }
+        comps.push(c);
+      }
+    }
+    const hOf = c => c.maxY - c.minY + 1;
+    const wOf = c => c.maxX - c.minX + 1;
+    const touchesTB = c => c.minY <= 0 || c.maxY >= h - 1;
+    // 基準＝罫線でも切れ端でもない、最も背の高い塊（＝数字）
+    let ref = null;
+    for (const c of comps) {
+      if (hOf(c) >= h * 0.9 || wOf(c) >= w * 0.9 || touchesTB(c)) continue;
+      if (!ref || hOf(c) > hOf(ref)) ref = c;
+    }
+    if (!ref) return crop;
+    const refH = hOf(ref);
+    if (refH < 8) return crop; // 小さすぎる画像では判定が不安定なので何もしない
+    const keep = new Set();
+    const dotCandidates = [];
+    for (const c of comps) {
+      const ch = hOf(c);
+      if (ch >= h * 0.9 || wOf(c) >= w * 0.9) continue;          // 罫線
+      if (touchesTB(c) && ch < refH * 0.55) continue;            // 隣の行の記号の切れ端
+      if (ch >= refH * 0.55) { keep.add(c.id); continue; }       // 数字
+      // 小さな塊：行の下端付近にあるほぼ正方形の点（小数点）だけを、後段で数字の隣にある
+      // ものに限って残す。数字より上に浮くもの（単位記号）や、左隣の欄からはみ出した
+      // 文字の切れ端（細長い）は捨てる。
+      const aspect = wOf(c) / ch;
+      if (c.maxY >= ref.maxY - refH * 0.25 && c.minY > ref.minY + refH * 0.5 && !touchesTB(c) &&
+          aspect >= 0.5 && aspect <= 2 && ch <= refH * 0.35) dotCandidates.push(c);
+    }
+    for (const c of dotCandidates) {
+      const nearDigit = comps.some(o => keep.has(o.id) &&
+        (c.minX - o.maxX <= refH * 0.8) && (o.minX - c.maxX <= refH * 0.8) &&
+        c.minX >= o.minX - refH * 0.8 && c.maxX <= o.maxX + refH * 0.8 + 1);
+      // 小数点は「数字と数字の間」または「数字の直後」にあるので、両側どちらかに数字が近接していればよい
+      if (nearDigit) keep.add(c.id);
+    }
+    if (!keep.size) return crop;
+    // v66で追加：単位記号（S・M）や隣の行の切れ端など、実際に「捨てる小さな塊」が1つも
+    // 無かった場合は、元の画像をそのままOCRに渡す。v65は全ての数量欄を白地に貼り直して
+    // いたが、単位記号の無い行（VALVE・BOSS・PLUG・LGの「1」など）では、貼り直した
+    // 「1」だけの画像をOCRが読み落とし／誤読する（例：1→50）副作用が出た。前処理は
+    // 「8」のように単位記号が付いて読めなくなっていた行にだけ適用する。
+    let removedSmall = false;
+    for (const c of comps) {
+      if (keep.has(c.id)) continue;
+      if (hOf(c) >= h * 0.9 || wOf(c) >= w * 0.9) continue; // 罫線は数えない
+      if (hOf(c) >= 5) { removedSmall = true; break; }
+    }
+    if (!removedSmall) return crop;
+    const pad = Math.round(refH);
+    const out = document.createElement('canvas');
+    out.width = w + pad * 2; out.height = h + pad * 2;
+    const octx = out.getContext('2d');
+    octx.fillStyle = '#fff';
+    octx.fillRect(0, 0, out.width, out.height);
+    const oimg = octx.getImageData(0, 0, out.width, out.height);
+    const od = oimg.data;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const li = y * w + x;
+        if (!keep.has(label[li])) continue;
+        // 塊の輪郭のにじみも残すため、元画像の画素をそのままコピーする
+        const si = li * 4, di = ((y + pad) * out.width + (x + pad)) * 4;
+        od[di] = d[si]; od[di + 1] = d[si + 1]; od[di + 2] = d[si + 2]; od[di + 3] = 255;
+      }
+    }
+    octx.putImageData(oimg, 0, 0);
+    out.__cleaned = true;
+    return out;
+  } catch (e) { return crop; /* 前処理に失敗しても元の画像でOCRを続ける */ }
+}
+
+
+// v66で追加：QTY欄のOCR。単位記号を消した画像（cropQtyForOcrが加工した場合のみ）で読み、
+// 数字が読めなければ元の画像でも読み直す。加工した画像で読めなかった／元の画像の方が
+// 正しく読めるケース（加工の副作用）でも取りこぼさないための二段構え。
+// 加工しなかった行（単位記号が無い行）は、従来どおり元の画像を1回読むだけ。
+// v68で更新：数量として不自然な値の判定。「0」「00」「08」のように0で始まる整数を対象にする
+// （数量0のボルト行は存在しないため。小数の0.5等は正常なので対象外）。
+// 単位記号「S」付きの「8」をOCRが「0」「00」と誤読する不具合への対策。
+function isImplausibleQty(text) {
+  const nums = normalizeWidthAndSpaces(String(text || '')).match(/\d+(?:\.\d+)?/g);
+  if (!nums || !nums.length) return false; // 数字なし＝別の救済ロジックの担当
+  return /^0\d*$/.test(nums[nums.length - 1]);
+}
+
+// v69：小さな1文字（「8」等）の読み違いに強くするため、拡大・余白追加・範囲変更した複数の
+// 画像で読み直し、「単位記号Sを消した行」は2回以上同じ数字が読めた場合だけ採用する（多数決）。
+function qtyScaledWithPad(src, factor, padPx) {
+  const w = Math.round(src.width * factor), h = Math.round(src.height * factor);
+  const out = document.createElement('canvas');
+  out.width = w + padPx * 2; out.height = h + padPx * 2;
+  const ctx = out.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, out.width, out.height);
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(src, padPx, padPx, w, h);
+  return out;
+}
+window.__qtyOcrLog = window.__qtyOcrLog || []; // 読み取り履歴（不具合調査用）
+
+async function recognizeQtyCell(pageCanvas, bbox, timeoutMs) {
+  const run = c => withTimeout(recognizeCrop(c), timeoutMs || 30000, 'OCR認識（QTY）');
+  const h = bbox.y1 - bbox.y0;
+  const shrunk = { x0: bbox.x0, x1: bbox.x1, y0: bbox.y0 + h * 0.1, y1: bbox.y1 - h * 0.1 };
+  const cleaned = cropQtyForOcr(pageCanvas, bbox);
+  const risky = !!cleaned.__cleaned; // 単位記号を消した行＝誤読しやすい行
+  const attempts = [['cleaned', () => cleaned]];
+  if (risky) attempts.push(['raw', () => cropForOcr(pageCanvas, bbox)]);
+  attempts.push(
+    ['cleaned-x2', () => qtyScaledWithPad(cleaned, 2, 40)],
+    ['shrunk-cleaned', () => cropQtyForOcr(pageCanvas, shrunk)],
+    ['raw-x2', () => qtyScaledWithPad(cropForOcr(pageCanvas, bbox), 2, 40)],
+    ['shrunk-raw', () => cropForOcr(pageCanvas, shrunk)]
+  );
+  const votes = {}; // 数値 -> {count, text}
+  let firstText = null;
+  const log = [];
+  for (let i = 0; i < attempts.length; i++) {
+    let txt = '';
+    try { txt = String(await run(attempts[i][1]()) || ''); } catch (e) { if (i === 0) throw e; continue; }
+    if (firstText === null) firstText = txt;
+    log.push(attempts[i][0] + ':' + txt);
+    if (!txt.match(QTY_NUMERIC_PATTERN) || isImplausibleQty(txt)) continue;
+    const nums = normalizeWidthAndSpaces(txt).match(QTY_NUMERIC_PATTERN);
+    const key = nums[nums.length - 1];
+    const v = votes[key] || (votes[key] = { count: 0, text: txt });
+    v.count++;
+    // 通常の行は最初にまともな数字が読めた時点で採用。誤読しやすい行は2回一致で採用。
+    if (!risky || v.count >= 2) { window.__qtyOcrLog.push(log.join(' | ') + ' => ' + key); return txt; }
+  }
+  // 一致が取れなかった場合：まともな値の中で票の多いものを採用（同数なら先に読めた方）
+  const keys = Object.keys(votes);
+  if (keys.length) {
+    keys.sort((x, y) => votes[y].count - votes[x].count);
+    window.__qtyOcrLog.push(log.join(' | ') + ' => ' + keys[0] + '(不確か)');
+    return votes[keys[0]].text;
+  }
+  window.__qtyOcrLog.push(log.join(' | ') + ' => (未検出)');
+  // 全試行で読めなかった。不自然な値（0/00等）は採用せず未検出扱いにする（「要確認」表示）。
+  return isImplausibleQty(firstText) ? '' : (firstText || '');
 }
 
 // v47で追加：表に印刷されている横罫線を画像から直接検出し、行の区切りとして使う。
@@ -3856,7 +4281,8 @@ const fixAutocadSymbolsForOcr = s => String(s || '')
 const QTY_NUMERIC_PATTERN = /\d+(?:\.\d+)?/g;
 function cleanOcrQty(rawText) {
   const matches = normalizeWidthAndSpaces(rawText).match(QTY_NUMERIC_PATTERN);
-  return matches && matches.length ? matches[matches.length - 1] : '';
+  const v = matches && matches.length ? matches[matches.length - 1] : '';
+  return /^0\d*$/.test(v) ? '' : v; // v68：「0」「00」等の不自然な値は採用しない
 }
 // OCR結果の先頭に、切り出し範囲へ写り込んでしまった見出し文字（「SIZE」「DESCRIPTION」
 // 「QTY」「ITEM」）が混入することがある（主に表の一番上の品目＝PIPE等で発生）。
@@ -4091,7 +4517,67 @@ function collectTextBasedItemBands(textContent, viewport, bounds, tableTopY, tab
   }
 
   if (!anchors.length) return [];
-  return buildRowBands(anchors, tableHeaderBottomY);
+  const builtBands = buildRowBands(anchors, tableHeaderBottomY);
+  // v63で追加：行の品目を「品目欄の罫線で囲まれたセル」から決めるため、生のアンカー(ラベルの
+  // Y座標)も一緒に返す。配列のプロパティなので既存の呼び出し側(find等)には影響しない。
+  builtBands.rawAnchors = anchors.map(a => ({ key: a.key, y: a.y, label: a.label }));
+  return builtBands;
+}
+
+// v63で追加：品目欄（SIZE列の左隣）に引かれた横罫線のY座標(pt)一覧を返す。
+// 従来の帯の作り方は「品目ラベルは各セルの下端に印字される」前提で、ラベルの間を帯に
+// していた。しかしこの図面のように、ラベルがセルの上端（90°・45°）や中央（PIPE等）に
+// 印字されるテンプレートでは、ラベルより下の行が次の品目の帯に入ってしまう
+// （例：90°ELBOWの2行目(20A SW)が45°ELBOWに振り分けられる）。
+// 品目欄の罫線は、セル（＝品目のまとまり）の境界だけに引かれており、行ごとの細い罫線は
+// 品目欄には延びないため、これを使えば「ラベルが属するセルの範囲」を正確に取れる。
+function detectItemCellLines(pageCanvas, xLeftPt, xRightPt, yTopPt, yBottomPt) {
+  try {
+    const px0 = Math.max(0, Math.round(xLeftPt * OCR_SCALE));
+    const px1 = Math.min(pageCanvas.width, Math.round(xRightPt * OCR_SCALE));
+    const py0 = Math.max(0, Math.round(yTopPt * OCR_SCALE));
+    const py1 = Math.min(pageCanvas.height, Math.round(yBottomPt * OCR_SCALE));
+    const w = px1 - px0, h = py1 - py0;
+    if (w <= 4 || h <= 4) return null;
+    const data = pageCanvas.getContext('2d').getImageData(px0, py0, w, h).data;
+    const runs = [];
+    let start = -1;
+    for (let y = 0; y < h; y++) {
+      let dark = 0;
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        if (lum < 150) dark++;
+      }
+      const isLine = dark / w >= 0.85;
+      if (isLine && start < 0) start = y;
+      if (!isLine && start >= 0) { runs.push([start, y - 1]); start = -1; }
+    }
+    if (start >= 0) runs.push([start, h - 1]);
+    // 太さが極端な塗りつぶし（罫線ではない）は除外し、中心のY座標(pt)を返す。
+    return runs.filter(r => (r[1] - r[0] + 1) <= OCR_SCALE * 4)
+      .map(r => yTopPt + ((r[0] + r[1]) / 2) / OCR_SCALE);
+  } catch (e) {
+    return null;
+  }
+}
+
+// v63で追加：Y座標(pt)が属する品目セルのラベルを返す。セル内のラベルが全て同じ品目なら
+// そのラベル（textItemBandsの同キーの帯のラベル）を返し、ラベルが無い／複数品目が
+// 混在する場合はnullを返して従来の帯判定に任せる。
+function itemLabelFromCell(y, cellLines, textItemBands) {
+  if (!cellLines || !cellLines.length || !textItemBands || !textItemBands.rawAnchors) return null;
+  let top = -Infinity, bottom = Infinity;
+  for (const ly of cellLines) {
+    if (ly <= y && ly > top) top = ly;
+    if (ly > y && ly < bottom) bottom = ly;
+  }
+  const inCell = textItemBands.rawAnchors.filter(a => a.y > top && a.y <= bottom + 4);
+  if (!inCell.length) return null;
+  const keys = new Set(inCell.map(a => a.key));
+  if (keys.size !== 1) return null;
+  const band = textItemBands.find(b => b.key === inCell[0].key);
+  return band ? band.label : inCell[0].label;
 }
 
 async function scanQtyColumnForMissingRows(page, textContent, viewport) {
@@ -4197,6 +4683,8 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
     ? Math.max(...['SIZE', 'DESCRIPTION', 'QTY'].map(k => headerCandidates[k].y))
     : tableHeaderBottomY;
   const gridBands = detectGridLineBands(pageCanvas, viewport, itemLabelBandLeft, bounds.boundQtyEnd, gridScanTopY, scanBottom);
+  // v63で追加：品目欄（SIZE列の左隣。列境界boundLeftのすぐ左の約25pt幅）の横罫線。
+  const itemCellLines = detectItemCellLines(pageCanvas, bounds.boundLeft - 25, bounds.boundLeft - 4, gridScanTopY, scanBottom);
   if (gridBands) {
     // 罫線ベース：行ごとにQTY欄だけを個別に小さく切り出してOCRする。ページ全体を
     // 1回でOCRする方式では、孤立した1文字の数字（2行書きセルの数量等）が検出漏れ
@@ -4204,8 +4692,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
     for (const band of gridBands) {
       let qty = '';
       try {
-        const qtyCropSmall = cropForOcr(pageCanvas, { x0: bounds.boundDescQty, x1: bounds.boundQtyEnd, y0: band.y0, y1: band.y1 });
-        const qtyText = normalizeWidthAndSpaces(await recognizeCrop(qtyCropSmall));
+        const qtyText = normalizeWidthAndSpaces(await recognizeQtyCell(pageCanvas, { x0: bounds.boundDescQty, x1: bounds.boundQtyEnd, y0: band.y0, y1: band.y1 }));
         const nums = qtyText.match(QTY_NUMERIC_PATTERN);
         if (nums && nums.length) qty = nums[nums.length - 1];
       } catch (e) { /* この行の数量が読めなくても他の項目は出力を試みる */ }
@@ -4235,6 +4722,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
       // 数字を採用する）に統一する。
       const nums = normalizeWidthAndSpaces(line.text).match(QTY_NUMERIC_PATTERN);
       if (!nums || !nums.length) continue; // 数字らしくない行（かすれ・罫線の誤認識等）は無視する
+      if (/^0\d*$/.test(nums[nums.length - 1])) continue; // v69：「0」「00」等の不自然な値は数量として採用しない
       const centerLocalY = (line.y0 + line.y1) / 2;
       const pageY = (tableHeaderBottomY - QTY_SCAN_TOP_EXTRA_MARGIN) - OCR_PADDING_PT + centerLocalY / OCR_SCALE;
       candidates.push({ qty: nums[nums.length - 1], y: pageY });
@@ -4275,6 +4763,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
   if (!rowBands.length) return [];
 
   const rows = [];
+  const itemCellOcrCache = new Map(); // v71：品目欄の結合セル単位のOCR結果（同じセルを何度も読まない）
   for (const band of rowBands) {
     const bandY0 = band.bandY0;
     const bandY1 = band.bandY1;
@@ -4288,12 +4777,49 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
     // 情報を優先する）。一致しなかった場合（＝品目ラベルが本当にテキストとして存在しない
     // 図面）のみ、従来通りITEM欄を画像としてOCR認識する。
     const textBand = textItemBands.find(b => band.qtyY >= b.y0 && band.qtyY < b.y1);
-    if (textBand) {
+    // v63で追加：品目欄の罫線で囲まれたセルの中にラベルがあれば、それを最優先で採用する
+    // （帯の位置ずれで隣の品目に振り分けられる不具合を防ぐ。上のdetectItemCellLines参照）。
+    const cellLabel = itemLabelFromCell(band.qtyY, itemCellLines, textItemBands);
+    if (cellLabel) {
+      itemText = cellLabel;
+    } else if (textBand) {
       itemText = textBand.label;
     } else {
+      // v71で追加：「マシンBOLT / & / NUT」のように品目ラベルが複数行の結合セルに縦書きで
+      // 並んでいる図面では、行ごとの帯で切り出すと「BOL &」「E」「0」のようにラベルが
+      // 断片的にしか読めず、品目が正しく判定できなかった（帯の中に「BOLT」だけ、
+      // 「&」だけ、あるいは何も無い、という状態になる）。品目欄の罫線で囲まれた
+      // セル全体（結合セルの上端〜下端）を1枚の画像としてOCRすれば「BOLT & NUT」と
+      // 全体が正しく読める。セルの高さが常識的な範囲（行数が多すぎない）の場合に限り、
+      // まずこのセル全体の読み取り結果を採用する。
       try {
-        const itemCrop = cropForOcr(pageCanvas, { x0: itemLabelBandLeft, x1: bounds.boundLeft, y0: bandY0, y1: bandY1 });
-        itemText = stripHeaderLeak(normalizeWidthAndSpaces(await recognizeCrop(itemCrop)));
+        if (itemCellLines && itemCellLines.length) {
+          let cTop = -Infinity, cBottom = Infinity;
+          for (const ly of itemCellLines) {
+            if (ly <= band.qtyY && ly > cTop) cTop = ly;
+            if (ly > band.qtyY && ly < cBottom) cBottom = ly;
+          }
+          if (Number.isFinite(cTop) && Number.isFinite(cBottom) && cBottom - cTop <= 140) {
+            const ck = `${Math.round(cTop)}|${Math.round(cBottom)}`;
+            if (!itemCellOcrCache.has(ck)) {
+              let cellText = '';
+              try {
+                const cellCrop = cropForOcr(pageCanvas, { x0: itemLabelBandLeft, x1: bounds.boundLeft, y0: cTop + 1, y1: cBottom - 1 });
+                cellText = stripHeaderLeak(normalizeWidthAndSpaces(await recognizeCrop(cellCrop)));
+              } catch (e) { /* 読めなければ従来の行単位OCRに任せる */ }
+              itemCellOcrCache.set(ck, cellText);
+            }
+            const cellText = itemCellOcrCache.get(ck);
+            if (cellText && hasMeaningfulChars(cellText) &&
+                MATERIAL_ROW_DEFS.some(def => def.test(cellText))) itemText = cellText;
+          }
+        }
+      } catch (e) { /* 従来の行単位OCRへ */ }
+      try {
+        if (!itemText) {
+          const itemCrop = cropForOcr(pageCanvas, { x0: itemLabelBandLeft, x1: bounds.boundLeft, y0: bandY0, y1: bandY1 });
+          itemText = stripHeaderLeak(normalizeWidthAndSpaces(await recognizeCrop(itemCrop)));
+        }
       } catch (e) { /* 品目名が読めなくても他の項目は出力を試みる */ }
       // v52で追加：罫線ベースの行区切り（v48）は1行分ぴったりの帯でITEM欄を切り出すため、
       // 品目ラベルが2行にまたがるセルの真ん中あたりに印字されている場合（例：FLANGEの
@@ -4401,8 +4927,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
       ];
       for (const rg of retryRanges) {
         try {
-          const crop = cropForOcr(pageCanvas, { x0: bounds.boundDescQty, x1: bounds.boundQtyEnd, y0: rg.y0, y1: rg.y1 });
-          const txt = normalizeWidthAndSpaces(await recognizeCrop(crop));
+          const txt = normalizeWidthAndSpaces(await recognizeQtyCell(pageCanvas, { x0: bounds.boundDescQty, x1: bounds.boundQtyEnd, y0: rg.y0, y1: rg.y1 }));
           const nums = txt.match(QTY_NUMERIC_PATTERN);
           if (nums && nums.length && (!rg.strict || nums.length === 1)) {
             band.qty = nums[nums.length - 1];
@@ -4419,7 +4944,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
     rows.push({
       item: matchedDef ? matchedDef.key : (itemText || '(品目未検出)'),
       size: sizeText,
-      description: descClean || descText,
+      description: sanitizeOcrDescription(descClean || descText),
       tag,
       qty: band.qty,
       boltType,
@@ -4570,7 +5095,7 @@ async function enhanceRowsWithOCR(page, rows) {
         // v2で追加：罫線のかすれ等を誤認識した記号のみの結果は採用しない。
         if (rawText && hasMeaningfulChars(rawText)) {
           const { desc, tag } = extractSupplyReuseTag(rawText, '');
-          row.description = desc || rawText;
+          row.description = sanitizeOcrDescription(desc || rawText);
           row.descFromOcr = true;
           if (confidence < OCR_LOW_CONFIDENCE_THRESHOLD) (row.lowConfidenceFields || (row.lowConfidenceFields = [])).push('DESCRIPTION');
           if (tag) row.tag = tag;
@@ -4584,8 +5109,7 @@ async function enhanceRowsWithOCR(page, rows) {
     if (row.qtyBBox && !String(row.qty || '').trim()) {
       anyAttempted = true;
       try {
-        const crop = cropForOcr(pageCanvas, row.qtyBBox);
-        const rawText = fixAutocadSymbolsForOcr(await withTimeout(recognizeCrop(crop), 30000, 'OCR認識（QTY）'));
+        const rawText = fixAutocadSymbolsForOcr(await recognizeQtyCell(pageCanvas, row.qtyBBox, 30000));
         const cleaned = cleanOcrQty(rawText);
         if (cleaned) { row.qty = cleaned; anyFilled = true; }
       } catch (e) {
@@ -5015,6 +5539,7 @@ function buildOutputRows() {
         lowConfidenceFields: m.lowConfidenceFields || [], // v9で追加：デメリット対策②（誤読の見落とし）。OCR自身の認識信頼度が低かった項目
         specWarnings, // テスト機能で追加（人が選ぶ必要がある候補・構造化データ）
         specWarning: specWarnings.map(w => w.label).join('、'), // テスト機能で追加（Excel出力用の文字列）
+        cellOverrides: m.cellOverrides || null, // 全セル編集対応：プレビューで手入力した列ごとの値（列記号→文字列）
         autoFixedInfo, // テスト機能で追加（自動修正済みの項目。色付け表示・元に戻す用）
         dictFixedInfo, // v34で追加：マイ辞書（OCRセル修正辞書）による自動修正の項目。赤色表示に使う
         newDrawing
@@ -5119,7 +5644,36 @@ const COLUMN_DEFS = [
 ];
 
 // プレビュー・コピー用に「表示用の文字列」を1箇所で決める（重量だけ小数3桁表記にする等）。
-function columnDisplayValue(def, r) {
+// 全セル編集対応：プレビューで手入力された値（cellOverrides）があればそれを返す。
+// 空文字も「意図的に空にした」有効な値として扱う。無ければnull。
+function getCellOverride(def, r) {
+  const o = r && r.cellOverrides;
+  return (o && Object.prototype.hasOwnProperty.call(o, def.col)) ? String(o[def.col]) : null;
+}
+// 手入力の値が「入力した時点の元データ」のままかどうかを判定するための署名。
+// ITEM・サイズ・材質・数量と、ページ単位のLINE No.／クラス／JOB Noを連結したもの。
+// これが手入力した時点と変わっていれば、自動計算列（B・DB・BM・重量など）に入れた
+// 手入力値は古くなっている可能性がある。
+function rowInputSignature(e, m) {
+  return [m.item, m.size, m.description, m.qty, m.tag, e && e.lineNo, e && e.pipeClassOverride, e && e.gasketClassOverride, e && e.jobNo]
+    .map(v => String(v == null ? '' : v)).join('\u0001');
+}
+function locateRowSource(rowId) {
+  const [pi, mi] = String(rowId || '').split(':').map(Number);
+  const e = pageData[pi];
+  const m = e && e.materials && e.materials[mi];
+  return { e, m };
+}
+// 自動計算される列（autoFilled）の手入力が、入力後に元データが変わって古くなっているか。
+function isOverrideStale(def, r) {
+  if (!def.autoFilled || getCellOverride(def, r) === null) return false;
+  const { e, m } = locateRowSource(r.rowId);
+  if (!m) return false;
+  const saved = m.cellOverrideSig && m.cellOverrideSig[def.col];
+  return saved !== undefined && saved !== rowInputSignature(e, m);
+}
+// 手入力を無視した、自動抽出・自動計算による表示値
+function autoDisplayValue(def, r) {
   if (!def.autoFilled) return '';
   const v = def.get(r);
   if (v === null || v === undefined || v === '') return '';
@@ -5128,6 +5682,11 @@ function columnDisplayValue(def, r) {
   if (def.col === 'AB') return Number(v).toFixed(3);
   if (def.col === 'W' || def.col === 'X') return Number(v).toFixed(2);
   return v;
+}
+// 表示・コピーで使う値：手入力があれば優先し、無ければ自動値。
+function columnDisplayValue(def, r) {
+  const ov = getCellOverride(def, r);
+  return ov !== null ? ov : autoDisplayValue(def, r);
 }
 
 
@@ -5460,7 +6019,24 @@ function renderPreview() {
           : (warnCols.has(def.col)
               ? ' style="background:#FFF6E5; outline:2px dashed #E8890C; outline-offset:-2px;"'
               : (autoFixedCols.has(def.col) ? ' style="background:#E3F3E3;"' : (!def.autoFilled ? ' style="color:#c3c9ce;"' : '')));
-        return `<td${cellStyle}${def.autoFilled ? ' class="mono"' : ''}>${escapeHtml(columnDisplayValue(def, r))}</td>`;
+        // 全セル編集対応：上のどれにも当てはまらない列（A〜E・O〜X・AA・AB）も直接編集できる。
+        // 手入力した値はm.cellOverrides[列]に保存し、表示・コピー・Excel出力で自動値より優先する。
+        {
+          const isOverridden = getCellOverride(def, r) !== null;
+          const autoVal = autoDisplayValue(def, r);
+          const isStale = isOverrideStale(def, r);
+          const cls = 'mono editable-generic' + (isStale ? ' cell-stale' : (isOverridden ? ' cell-overridden' : ''));
+          const ttl = isStale
+            ? `手入力した後に、この行のITEM・サイズ・数量などが変更されています。手入力の値が古い可能性があります（現在の自動計算値：${escapeHtml(String(autoVal)) || '空欄'}）。「手入力の要確認セルを再計算」で自動値に戻せます`
+            : isOverridden
+            ? `手入力で編集済み（自動値：${escapeHtml(String(autoVal)) || '空欄'}）。自動値に戻すには、その値を入力するかEscで編集を取り消してください`
+            : 'クリックして直接編集できます（Enterで確定・Escで取り消し）';
+          return `<td class="${cls}" contenteditable="true" spellcheck="false"${!def.autoFilled && !isOverridden ? ' style="color:#c3c9ce;"' : ''}
+              data-row-id="${escapeHtml(r.rowId)}" data-col="${def.col}" data-auto-value="${escapeHtml(String(autoVal))}"
+              data-current-value="${escapeHtml(columnDisplayValue(def, r))}"
+              title="${ttl}"
+              >${escapeHtml(columnDisplayValue(def, r))}</td>`;
+        }
       }).join('')}
       ${multi ? `<td class="mono">${escapeHtml(r.sourceFile || '-')}</td>` : ''}
     </tr>`;
@@ -5927,8 +6503,10 @@ function writeMaterialRow(ws, r, d, styleCache) {
     row.getCell(c).style = Object.assign({}, styleCache[c]);
   }
   COLUMN_DEFS.forEach(def => {
-    if (!def.autoFilled) return; // 自動抽出できない列はテンプレートの値のまま（空欄）にしておく
-    let v = def.get(d);
+    // 全セル編集対応：プレビューで手入力された値があれば、自動抽出の対象外の列も含めてそれを書き込む。
+    const ov = getCellOverride(def, d);
+    if (!def.autoFilled && ov === null) return; // 自動抽出できない列はテンプレートの値のまま（空欄）にしておく
+    let v = ov !== null ? ov : def.get(d);
     if (v === '' || v === undefined) v = null;
     // 数量・重量は、SUM等の数式でそのまま集計できるよう、Excel上も数値セルとして
     // 書き込む（文字列のままだとSUMが0扱い・エラーになるため）。
@@ -6043,9 +6621,9 @@ btnExcel.addEventListener('click', async () => {
 // プレビュー表をタブ区切りテキスト（TSV）としてクリップボードにコピーする。
 // TSVはExcelに貼り付けると自動的にセルごとに分かれて入るため、
 // 「別のExcelにコピペして運用する」用途に使う。既存シートの見出し行はそのまま活かす想定のため、
-// 見出し行は含めず、断熱仕様(B列)〜重量(R列)のデータだけをコピーする。
-const COPY_RANGE_START_COL = 'C'; // 断熱仕様
-const COPY_RANGE_END_COL = 'T';   // 重量
+// 見出し行は含めず、材質区分(B列)〜BM(X列)のデータだけをコピーする。
+const COPY_RANGE_START_COL = 'B'; // 材質区分
+const COPY_RANGE_END_COL = 'X';   // BM（途中のB・DB列を含めてコピーする）
 const COPY_COLUMN_DEFS = COLUMN_DEFS.slice(
   COLUMN_DEFS.findIndex(d => d.col === COPY_RANGE_START_COL),
   COLUMN_DEFS.findIndex(d => d.col === COPY_RANGE_END_COL) + 1
