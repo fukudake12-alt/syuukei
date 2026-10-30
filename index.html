@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>図面別 支給品・転用品・既設転用 集計ツール（高精度OCR版 v88）</title>
+<title>図面別 支給品・転用品・既設転用 集計ツール（高精度OCR版 v93）</title>
 <script src="libs/pdf.min.js"></script>
 <script src="libs/exceljs.min.js"></script>
 <script src="libs/ort.min.js"></script>
@@ -877,6 +877,120 @@ async function loadPdfPageForRegionEditor(file) {
   }
 }
 
+// v93：読み取り範囲の設定画面で、枠・線のずれを自動チェックして知らせる（画面表示のみ。読み取り処理には影響しない）。
+// gray: 0-255の濃淡配列(w×h)。state: 設定画面の現在値（比率）。戻り値: [{level:'ok'|'warn'|'info', text, fixes?:[{key,value}]}]
+function analyzeRegionLayout(gray, w, h, state) {
+  const dark = (x, y) => gray[y * w + x] < 150;
+  const clampI = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const msgs = [];
+  const yTop = clampI(Math.round(state.headerBottom * h), 0, h - 1);
+  const yBot = clampI(Math.round(state.tableBottom * h), yTop + 1, h);
+  const xL = clampI(Math.round(state.itemLeft * w), 0, w - 1);
+  const xR = clampI(Math.round(state.boundQtyEnd * w), xL + 1, w);
+
+  // --- 縦罫線（表の高さの55%以上つながる線）を検出 ---
+  const vRules = [];
+  const span = Math.max(1, yBot - yTop);
+  for (let x = Math.max(0, xL - Math.round(w * 0.04)); x < Math.min(w, xR + Math.round(w * 0.04)); x++) {
+    let cnt = 0;
+    for (let y = yTop; y < yBot; y++) if (dark(x, y)) cnt++;
+    if (cnt >= span * 0.55) vRules.push(x);
+  }
+  const vMerged = [];
+  vRules.forEach(x => { const l = vMerged[vMerged.length - 1]; if (l && x - l.end <= 2) l.end = x; else vMerged.push({ start: x, end: x }); });
+  const vRatio = vMerged.map(g => ((g.start + g.end) / 2) / w);
+
+  // --- 横罫線（表幅の70%以上つながる線）を検出（ページ上部〜表下端） ---
+  const hRules = [];
+  const xSpan = Math.max(1, xR - xL);
+  for (let y = 0; y < Math.min(h, yBot + Math.round(h * 0.03)); y++) {
+    let cnt = 0;
+    for (let x = xL; x < xR; x++) if (dark(x, y)) cnt++;
+    if (cnt >= xSpan * 0.7) hRules.push(y);
+  }
+  const hMerged = [];
+  hRules.forEach(y => { const l = hMerged[hMerged.length - 1]; if (l && y - l.end <= 2) l.end = y; else hMerged.push({ start: y, end: y }); });
+  const hRatio = hMerged.map(g => ((g.start + g.end) / 2) / h);
+
+  // 1) 縦の4本の線が実際の罫線に乗っているか
+  const vDefs = [['itemLeft', '品目欄の左端（緑の左）'], ['boundLeft', 'SIZE欄の左端（緑と紫の境）'],
+                 ['boundDescQty', 'QTY欄の左端（紫と橙の境）'], ['boundQtyEnd', '表の右端（橙の右）']];
+  const vFixes = [];
+  {
+    // 4本の線を、検出した罫線のうち「左から順に別々の4本」に割り当てる（ずれの合計が最小になる組合せ）。
+    // 同じ罫線を2本に当てたり、順序が入れ替わる提案を避けるため。
+    const cand = vRatio.slice(0, 14);
+    const cur4 = vDefs.map(([key]) => state[key]);
+    let bestCombo = null, bestCost = Infinity;
+    const pick = (idx, start, chosen, cost) => {
+      if (cost >= bestCost) return;
+      if (idx === 4) { bestCost = cost; bestCombo = chosen.slice(); return; }
+      for (let i = start; i < cand.length - (3 - idx); i++) {
+        chosen.push(cand[i]);
+        pick(idx + 1, i + 1, chosen, cost + Math.abs(cand[i] - cur4[idx]));
+        chosen.pop();
+      }
+    };
+    if (cand.length >= 4) pick(0, 0, [], 0);
+    if (bestCombo) {
+      vDefs.forEach(([key, label], i) => {
+        const best = bestCombo[i], d = Math.abs(best - state[key]);
+        if (d > 0.004 && d <= 0.05) {
+          msgs.push({ level: 'warn', text: `${label}が罫線から ${(d * 100).toFixed(1)}% ずれています。近くの罫線は ${best.toFixed(4)} の位置です。`, fixes: [{ key, value: best }] });
+          vFixes.push({ key, value: best });
+        }
+      });
+    }
+  }
+  if (vFixes.length > 1) msgs.push({ level: 'warn', text: '縦の線をまとめて近くの罫線に合わせます。', fixes: vFixes, isAll: true });
+
+  // 2) 見出し行の下端（上から2本目の横罫線＝見出し行の下の線を目安にする）
+  const topRules = hRatio.filter(r => r < 0.2);
+  if (topRules.length >= 2) {
+    const hb = topRules[1];
+    const diff = state.headerBottom - hb;
+    if (diff < -0.004) msgs.push({ level: 'warn', text: `上端の線が見出し行（ITEM/SIZE…）の文字にかかっています。見出しの下の罫線は ${hb.toFixed(4)} の位置（目安）です。見出しが材料の行として読まれる恐れがあります。`, fixes: [{ key: 'headerBottom', value: hb }] });
+    else if (diff > 0.02) msgs.push({ level: 'warn', text: `上端の線が低すぎます。見出しの下の罫線は ${hb.toFixed(4)} の位置（目安）です。1行目のデータが読まれない恐れがあります。`, fixes: [{ key: 'headerBottom', value: hb }] });
+  }
+
+  // 3) 表の下端が、表の罫線より大きく下（タイトル欄など）に入り込んでいないか
+  const rulesInTable = hRatio.filter(r => r >= state.headerBottom && r <= state.tableBottom + 0.03);
+  if (rulesInTable.length) {
+    const lastRule = rulesInTable[rulesInTable.length - 1];
+    if (lastRule < state.tableBottom - 0.06) {
+      msgs.push({ level: 'info', text: `表の下端の線（${state.tableBottom.toFixed(3)}）は、最後の罫線（${lastRule.toFixed(3)}）よりかなり下です。タイトル欄が範囲に入っていないか確認してください。`, fixes: [{ key: 'tableBottom', value: Math.min(1, lastRule + 0.005) }] });
+    }
+  }
+
+  // 4) 各枠の文字量と位置
+  const inkRatio = box => {
+    const x0 = clampI(Math.round(box.x0 * w), 0, w - 1), x1 = clampI(Math.round(box.x1 * w), x0 + 1, w);
+    const y0 = clampI(Math.round(box.y0 * h), 0, h - 1), y1 = clampI(Math.round(box.y1 * h), y0 + 1, h);
+    let c = 0, t = 0;
+    for (let y = y0; y < y1; y += 1) for (let x = x0; x < x1; x += 1) { t++; if (dark(x, y)) c++; }
+    return t ? c / t : 0;
+  };
+  const overlap = (a, b) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+  const ln = state.lineNoBox, dn = state.drawingNoBox;
+  if (ln) {
+    const ir = inkRatio(ln);
+    if (ln.y0 >= state.tableBottom - 0.01) {
+      msgs.push({ level: 'warn', text: `LINE No.の枠が表の下（タイトル欄）にあります。「TITLE」「CLIENT」などの見出し文字を読んでしまう恐れがあります（枠内の文字量 ${(ir * 100).toFixed(1)}%）。この様式にLINE No.欄が無い場合は、何も書かれていない場所へ移してください。` });
+    } else if (ir < 0.002) {
+      msgs.push({ level: 'info', text: 'LINE No.の枠の中に文字がほとんどありません。この様式にLINE No.欄が無い場合は問題ありません。' });
+    }
+    if (dn && overlap(ln, dn)) msgs.push({ level: 'warn', text: 'LINE No.の枠とDRAWING No.の枠が重なっています。' });
+  }
+  if (dn) {
+    const ir = inkRatio(dn);
+    if (ir < 0.004) msgs.push({ level: 'warn', text: `DRAWING No.の枠の中に文字がほとんどありません（${(ir * 100).toFixed(2)}%）。図面番号の位置から外れている可能性があります。` });
+    if ((dn.x1 - dn.x0) * (dn.y1 - dn.y0) > 0.12) msgs.push({ level: 'info', text: 'DRAWING No.の枠が広すぎます。他の文字を巻き込むと図面番号を誤読しやすくなります。' });
+  }
+
+  if (!msgs.some(m => m.level === 'warn')) msgs.unshift({ level: 'ok', text: '縦線・上端の線は、罫線の位置とおおむね合っています。' });
+  return msgs;
+}
+
 function showOcrRegionEditorModal(canvas, dispW, dispH) {
   const existing = document.getElementById('ocrRegionEditorOverlay');
   if (existing) existing.remove();
@@ -1157,6 +1271,63 @@ function showOcrRegionEditorModal(canvas, dispW, dispH) {
   bindBoxDrag(boxDrawingNo, 'drawingNoBox');
   bindBoxDrag(boxLawCode, 'lawCodeBox');
 
+  // --- v93：ずれの自動チェック表示 ---
+  const checkWrap = document.createElement('div');
+  checkWrap.style.cssText = 'margin-top:12px; border:1px solid #D8DFE6; border-radius:8px; padding:8px 10px; background:#FAFBFC; font-size:12.5px;';
+  panel.appendChild(checkWrap);
+  let analysisGray = null, analysisW = 0, analysisH = 0;
+  try {
+    const aw = Math.min(1800, canvas.width);
+    const ah = Math.round(canvas.height * aw / canvas.width);
+    const tmp = document.createElement('canvas');
+    tmp.width = aw; tmp.height = ah;
+    const tctx = tmp.getContext('2d', { willReadFrequently: true });
+    tctx.drawImage(canvas, 0, 0, aw, ah);
+    const data = tctx.getImageData(0, 0, aw, ah).data;
+    analysisGray = new Uint8Array(aw * ah);
+    for (let i = 0, j = 0; i < data.length; i += 4, j++) analysisGray[j] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
+    analysisW = aw; analysisH = ah;
+  } catch (e) { analysisGray = null; }
+  let lastCheckSig = '';
+  function runLayoutCheck() {
+    if (!analysisGray) { checkWrap.textContent = '自動チェックは、この環境では使えません。'; return; }
+    const sig = JSON.stringify([state.itemLeft, state.boundLeft, state.boundDescQty, state.boundQtyEnd, state.headerBottom, state.tableBottom, state.lineNoBox, state.drawingNoBox]);
+    if (sig === lastCheckSig) return;
+    lastCheckSig = sig;
+    let msgs = [];
+    try { msgs = analyzeRegionLayout(analysisGray, analysisW, analysisH, state); }
+    catch (e) { msgs = [{ level: 'info', text: '自動チェックでエラーが発生しました: ' + (e && e.message ? e.message : e) }]; }
+    checkWrap.innerHTML = '';
+    const head = document.createElement('div');
+    head.textContent = '自動チェック（目安です。図面を見て最終判断してください）';
+    head.style.cssText = 'font-weight:600; color:#42505c; margin-bottom:4px;';
+    checkWrap.appendChild(head);
+    msgs.forEach(m => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex; gap:8px; align-items:flex-start; padding:3px 0;';
+      const icon = document.createElement('span');
+      icon.textContent = m.level === 'ok' ? '✔' : (m.level === 'warn' ? '⚠' : 'ℹ');
+      icon.style.cssText = 'flex:none; width:1.2em; font-weight:700; color:' + (m.level === 'ok' ? '#2E8B57' : (m.level === 'warn' ? '#C0392B' : '#2E6DA4')) + ';';
+      const txt = document.createElement('span');
+      txt.textContent = m.text; txt.style.cssText = 'flex:1;';
+      row.appendChild(icon); row.appendChild(txt);
+      if (m.fixes && m.fixes.length) {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = 'ghost';
+        b.textContent = m.isAll ? 'まとめて合わせる' : '合わせる';
+        b.style.cssText = 'flex:none; font-size:11.5px; padding:2px 8px;';
+        b.addEventListener('click', () => { m.fixes.forEach(f => { state[f.key] = f.value; }); redraw(); redrawAllBoxes(); lastCheckSig = ''; runLayoutCheck(); });
+        row.appendChild(b);
+      }
+      checkWrap.appendChild(row);
+    });
+  }
+  runLayoutCheck();
+  const checkTimer = setInterval(() => {
+    if (!document.body.contains(overlay)) { clearInterval(checkTimer); return; }
+    runLayoutCheck();
+  }, 400);
+
   // --- 保存済みプロファイルの管理UI ---
   const controlsRow = document.createElement('div');
   controlsRow.style.cssText = 'display:flex; align-items:center; gap:8px; margin-top:14px; flex-wrap:wrap;';
@@ -1257,12 +1428,12 @@ function showOcrRegionEditorModal(canvas, dispW, dispH) {
   }
   renderProfileList();
 
-  saveBtn.addEventListener('click', () => {
+  saveBtn.addEventListener('click', async () => {
     const name = nameInput.value.trim();
     if (!name) { alert('客先名を入力してください。'); return; }
     const profiles = loadOcrRegionProfiles();
     const isNew = !profiles[name];
-    if (isNew && Object.keys(profiles).length >= OCR_REGION_PROFILE_MAX_COUNT) {
+    if (isNew && Object.keys(profiles).filter(k => !(k in BUILTIN_OCR_PROFILES)).length >= OCR_REGION_PROFILE_MAX_COUNT) {
       alert(`プロファイルは${OCR_REGION_PROFILE_MAX_COUNT}件までです。既存のプロファイルを削除するか、既存の名前で上書き保存してください。`);
       return;
     }
@@ -1282,11 +1453,16 @@ function showOcrRegionEditorModal(canvas, dispW, dispH) {
       drawingNoBox: { ...state.drawingNoBox },
       lawCodeBox: { ...state.lawCodeBox }
     };
-    saveOcrRegionProfiles(profiles);
+    const savedOk = await saveOcrRegionProfiles(profiles);
     setActiveOcrProfileName(name);
     refreshOcrProfileSelect();
     renderProfileList();
-    alert(`プロファイル「${name}」を保存し、選択中にしました。`);
+    if (savedOk) {
+      alert(`プロファイル「${name}」を保存し、選択中にしました。`);
+    } else {
+      alert(`【保存に失敗しました】\n${lastProfileSaveError}\n\n今回のみ、このタブを閉じるまでは使えます。\n次回以降も使うには、この後ダウンロードされるJSONファイルを保管してください。\n\n保存容量の主な使用元:\n${describeLocalStorageUsage()}`);
+      downloadProfilesJson(profiles);
+    }
   });
 
   document.body.appendChild(overlay);
@@ -3854,24 +4030,122 @@ const OCR_REGION_PROFILES_STORAGE_KEY = 'materialOcrRegionProfiles_v1';
 const OCR_ACTIVE_PROFILE_STORAGE_KEY = 'materialOcrActiveProfileName_v1';
 const OCR_REGION_PROFILE_MAX_COUNT = 5;
 
-function loadOcrRegionProfiles() {
-  try {
-    const raw = localStorage.getItem(OCR_REGION_PROFILES_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch (e) { return {}; }
+// v89：保存失敗の原因（容量超過・file://での制限・プライベートモード等）が握りつぶされ、
+// 「保存しました」と表示されるのに実際は保存されていない問題を修正。
+// 保存後に読み戻して確認し、失敗時は原因を表示、メモリ上（このタブを閉じるまで）に保持し、
+// JSONファイルとして書き出せるようにする。
+// v92：図面から実測した読み取り範囲の組み込みプリセット（読み取り専用。保存データには書き込まない）。
+// G25094-101（RAIZNEXT様式）の罫線位置を実測：品目欄左端0.742／SIZE左端0.8006／QTY左端0.9335／表右端0.9565、
+// 見出し下端0.060／表下端0.77。標準の固定比率(0.8199/0.9679/0.9870)とは表の位置が異なる。
+const BUILTIN_OCR_PROFILES = {
+  '【実測】RAIZNEXT様式(G25094)': {
+    itemLeftRatio: 0.742,
+    columns: { boundLeft: 0.8006, boundSizeDesc: 0.86, boundDescQty: 0.9335, boundQtyEnd: 0.9565 },
+    headerBottomRatio: 0.060,
+    tableBottomRatio: 0.77,
+    lineNoBox: { x0: 0.80, x1: 0.95, y0: 0.70, y1: 0.76 },   // この様式にLINE No.欄は無いため、空欄部分を指定
+    drawingNoBox: { x0: 0.80, x1: 0.96, y0: 0.945, y1: 0.99 },
+    lawCodeBox: { x0: 0, x1: 0.8006, y0: 0, y1: 1 }
+  }
+};
+const BUILTIN_PROFILE_PREFIX = '【実測】';
+let _ocrProfilesMemory = null;   // 読み込み済みプロファイル（メモリ）
+let _ocrActiveNameMemory = null; // 選択中プロファイル名（メモリ）
+let lastProfileSaveError = '';
+// v90：localStorageは同じ場所で開く他アプリと容量(約10MB)を共有するため、満杯になると保存できない。
+// 容量の大きいIndexedDBを主な保存先にし、localStorageは「できれば」書く補助にする。
+function _idbOpen() {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') { reject(new Error('IndexedDB非対応')); return; }
+    const req = indexedDB.open('materialAggToolDB', 1);
+    req.onupgradeneeded = () => { req.result.createObjectStore('kv'); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error('IndexedDBを開けません'));
+  });
 }
+function _idbGet(key) {
+  return _idbOpen().then(db => new Promise((resolve, reject) => {
+    const r = db.transaction('kv', 'readonly').objectStore('kv').get(key);
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  }));
+}
+function _idbSet(key, val) {
+  return _idbOpen().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction('kv', 'readwrite');
+    tx.objectStore('kv').put(val, key);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('書き込みが中断されました'));
+  }));
+}
+function loadOcrRegionProfiles() {
+  let stored = {};
+  if (_ocrProfilesMemory) stored = JSON.parse(JSON.stringify(_ocrProfilesMemory));
+  else {
+    try {
+      const raw = localStorage.getItem(OCR_REGION_PROFILES_STORAGE_KEY);
+      if (raw) stored = JSON.parse(raw);
+    } catch (e) { /* fallthrough */ }
+  }
+  return { ...JSON.parse(JSON.stringify(BUILTIN_OCR_PROFILES)), ...stored };
+}
+// 戻り値：Promise<boolean>（IndexedDBまたはlocalStorageのどちらかに保存できればtrue）
 function saveOcrRegionProfiles(profiles) {
-  try { localStorage.setItem(OCR_REGION_PROFILES_STORAGE_KEY, JSON.stringify(profiles)); }
-  catch (e) { /* localStorageが使えない環境ではプロファイル保存を諦める */ }
+  lastProfileSaveError = '';
+  profiles = Object.fromEntries(Object.entries(profiles).filter(([k]) => !(k in BUILTIN_OCR_PROFILES))); // 組み込みは保存しない
+  _ocrProfilesMemory = JSON.parse(JSON.stringify(profiles));
+  let lsOk = false, lsErr = null;
+  try { localStorage.setItem(OCR_REGION_PROFILES_STORAGE_KEY, JSON.stringify(profiles)); lsOk = true; }
+  catch (e) { lsErr = e; }
+  return _idbSet(OCR_REGION_PROFILES_STORAGE_KEY, _ocrProfilesMemory).then(() => true).catch(idbErr => {
+    if (lsOk) return true;
+    lastProfileSaveError = `ブラウザの保存領域に書き込めません（localStorage: ${lsErr && lsErr.message ? lsErr.message : lsErr} / IndexedDB: ${idbErr && idbErr.message ? idbErr.message : idbErr}）。`;
+    return false;
+  });
+}
+// 起動時：IndexedDB（無ければlocalStorage）から読み込んでメモリへ。
+function hydrateOcrProfiles() {
+  return Promise.all([
+    _idbGet(OCR_REGION_PROFILES_STORAGE_KEY).catch(() => undefined),
+    _idbGet(OCR_ACTIVE_PROFILE_STORAGE_KEY).catch(() => undefined)
+  ]).then(([prof, active]) => {
+    if (prof && typeof prof === 'object') _ocrProfilesMemory = prof;
+    if (typeof active === 'string') _ocrActiveNameMemory = active;
+  }).catch(() => {});
+}
+// localStorageの使用量（キー別・KB）。容量超過時の原因調査用。
+function describeLocalStorageUsage() {
+  try {
+    const rows = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      rows.push([k, ((localStorage.getItem(k) || '').length * 2) / 1024]);
+    }
+    rows.sort((a, b) => b[1] - a[1]);
+    return rows.slice(0, 5).map(r => `${r[0]}: ${Math.round(r[1])}KB`).join('\n');
+  } catch (e) { return '(取得できません)'; }
+}
+function downloadProfilesJson(profiles) {
+  const blob = new Blob([JSON.stringify(profiles, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'ocr_region_profiles.json';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 function getActiveOcrProfileName() {
+  if (_ocrActiveNameMemory !== null) return _ocrActiveNameMemory;
   try { return localStorage.getItem(OCR_ACTIVE_PROFILE_STORAGE_KEY) || ''; }
   catch (e) { return ''; }
 }
 function setActiveOcrProfileName(name) {
-  try { localStorage.setItem(OCR_ACTIVE_PROFILE_STORAGE_KEY, name || ''); }
-  catch (e) { /* noop */ }
+  _ocrActiveNameMemory = name || '';
+  try { localStorage.setItem(OCR_ACTIVE_PROFILE_STORAGE_KEY, name || ''); } catch (e) { /* noop */ }
+  _idbSet(OCR_ACTIVE_PROFILE_STORAGE_KEY, name || '').catch(() => {});
 }
+// 起動時にIndexedDBから読み込み、プルダウンを更新する。
+hydrateOcrProfiles().then(() => { try { refreshOcrProfileSelect(); } catch (e) { /* noop */ } });
 // 現在選択中の客先プロファイルの内容を返す。未選択・未保存・壊れている場合はnull
 // （呼び出し側はnullなら初期設定＝固定比率にフォールバックする）。
 function getActiveOcrProfile() {
@@ -6129,6 +6403,22 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
     });
   }
 
+  // v91：品目欄の罫線が検出できず(itemCellKey==null)、かつ品目名を他の行から借用した行だけを対象に、
+  // 内容（SIZE/DESCRIPTION）から明らかに別の品目と分かる場合のみ補正する。
+  // ・罫線が検出できて借用が確定している行、ラベルを直接読めた行には一切触れない（既存の挙動を維持）。
+  // ・借用した品目と内容が矛盾しない行は、そのまま。
+  // ・TEEとレデューサー（A×B表記）のように内容だけでは区別できないものは、誤った品目を
+  //   当てずに「(品目未検出)」として人が確認できるようにする。
+  rows.forEach(row => {
+    if (!row.itemInherited || row.itemCellKey != null) return;
+    const fix = inferItemFromContentForInherited(row);
+    if (fix && fix !== row.item) {
+      row.itemInheritedFromRaw = `${row.itemInheritedFromRaw || ''}→内容から補正(${row.item}→${fix})`;
+      row.item = fix;
+      if (fix !== '(品目未検出)') row.itemMatched = true;
+    }
+  });
+
   // v53で追加：この自動検出行の経路ではreclassifyBoltGasket()が一度も呼ばれておらず、
   // 品目ラベルOCRが「R ECC.」等に化けた行（実際はフランジ）がそのまま確定していた。
   // DESCRIPTIONの表記（JIS10K SOP FF SS400等）から品目を照合し直す。
@@ -6193,6 +6483,34 @@ function splitSizeAndDescriptionOcrCore(text) {
   const m = s.match(/^(\S{0,5}?\s*)([0-9]+(?:\.[0-9]+)?\s*[A-Za-zＡ-Ｚａ-ｚ]{0,3}(?:\s*[xX×]\s*[0-9]+(?:\.[0-9]+)?\s*[A-Za-z]{0,3})?(?:用|#)?)\s+(\S.*)$/);
   if (m) return { size: m[2].trim(), description: m[3].trim() };
   return { size: '', description: s };
+}
+
+// v91：借用された品目名が内容と明らかに矛盾する場合の補正先を返す（補正不要なら ''、不明なら '(品目未検出)'）。
+function inferItemFromContentForInherited(row) {
+  const cur = row.item;
+  const desc = String(row.description || row.desc || '').normalize('NFKC');
+  const size = String(row.size || '').normalize('NFKC').replace(/\s/g, '');
+  const U = desc.toUpperCase();
+  let guess = '';
+  if (/V\s*#|GASKET|ガスケット/.test(U)) guess = 'GASKET';
+  else if (/BOLT|ボルト|ﾎﾞﾙﾄ|ナット|ﾅｯﾄ|\bM\d{1,2}\s*[X×]\s*\d+/.test(U)) guess = 'BOLT&NUT';
+  else if (/SCS14A|ボール弁|バルブ|VALVE/.test(U)) guess = 'VALVE';
+  else if (/JIS\s*\d+K\s*(RF|FF|LF|SOP|SOH|WN|SW|BL)\b/.test(U) || /\bFLANGE\b|フランジ/.test(U)) guess = 'FLANGE';
+  else if (/(^|[^A-Z])(TP|STPG|SGP)(-|\b)/.test(U) || /\bBE\b/.test(U)) guess = 'PIPE';
+  else {
+    const mm = size.match(/^(\d+(?:\.\d+)?A?)[×xX](\d+(?:\.\d+)?A?)$/);
+    if (mm) {
+      // A×B表記はエルボではあり得ない。同径ならTEE、異径はTEE/レデューサーの判別不能。
+      if (/ELBOW/.test(cur)) guess = (mm[1] === mm[2]) ? 'TEE' : '(品目未検出)';
+      else guess = '';
+    }
+  }
+  if (!guess) return '';
+  // 借用した品目と同じ系統なら補正しない（例：GASKET行の説明に「JIS10K RF」があっても GASKETのまま）
+  if (guess === cur) return '';
+  if (cur === 'GASKET' && guess === 'FLANGE') return '';
+  if (cur === 'BLIND FLANGE' && guess === 'FLANGE') return '';
+  return guess;
 }
 
 async function enhanceRowsWithOCR(page, rows) {
