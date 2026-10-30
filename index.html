@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>図面別 支給品・転用品・既設転用 集計ツール（高精度OCR版 v87）</title>
+<title>図面別 支給品・転用品・既設転用 集計ツール（高精度OCR版 v88）</title>
 <script src="libs/pdf.min.js"></script>
 <script src="libs/exceljs.min.js"></script>
 <script src="libs/ort.min.js"></script>
@@ -2474,6 +2474,14 @@ async function analyzePage(pdf, pageNum) {
     });
   }
 
+  // v88：親図は、既知品目の行が2件以上ある場合のみ材料表ありとして採用、それ以外は破棄。
+  if (series === '親図' && materials.length) {
+    const knownKeysP = new Set(MATERIAL_ROW_DEFS.map(d => d.key));
+    const knownRows = materials.filter(m => knownKeysP.has(m.item));
+    materials = knownRows.length >= 2 ? knownRows : [];
+    console.info(`[親図] page ${pageNum} / ${drawingNo}：既知品目 ${knownRows.length}行 → ${materials.length ? '材料表として採用' : '破棄'}`);
+  }
+
   // ボルト行を「サイズ＝◯A用／材質＝M16×55L SS400/SS400」の形にそろえる
   // v65で廃止：ボルト行のサイズ(◯A用)をガスケット/フランジから推定して入れる処理（normalizeBoltRows）。
   // 図面に印字されていない値を作らないため呼び出しをやめた。
@@ -2852,7 +2860,10 @@ function extractPipeAndGasketClass(lineNo) {
 // 文字や数字が材料行と誤認され、「(品目未検出)」の意味のない行が大量に出てしまう。
 // ※図面番号が読めなかったページ（図書リスト）と、番号が600番台以上・形式不明のページは、
 //   アイソメ図の番号読み取り失敗の可能性もあるため、対象外にせず従来どおり読み取る。
-const MATERIAL_SKIP_SERIES = ['親図'];
+// v88：親図(100番台)でも材料表付きの図面があるため、番号だけでのスキップをやめた。
+// 代わりに読み取り後、既知品目(PIPE/ELBOW/FLANGE等)の行が2件以上ある場合だけ「材料表あり」と
+// 判定し、無ければ結果を破棄する（親図で別の表が材料行と誤認される問題の対策）。
+const MATERIAL_SKIP_SERIES = [];
 
 function getDrawingSeries(drawingNo) {
   if (!drawingNo) return '図書リスト';
