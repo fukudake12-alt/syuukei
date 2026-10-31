@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>図面別 支給品・転用品・既設転用 集計ツール（高精度OCR版 v93）</title>
+<title>図面別 支給品・転用品・既設転用 集計ツール（高精度OCR版 v105）</title>
 <script src="libs/pdf.min.js"></script>
 <script src="libs/exceljs.min.js"></script>
 <script src="libs/ort.min.js"></script>
@@ -913,8 +913,8 @@ function analyzeRegionLayout(gray, w, h, state) {
   const hRatio = hMerged.map(g => ((g.start + g.end) / 2) / h);
 
   // 1) 縦の4本の線が実際の罫線に乗っているか
-  const vDefs = [['itemLeft', '品目欄の左端（緑の左）'], ['boundLeft', 'SIZE欄の左端（緑と紫の境）'],
-                 ['boundDescQty', 'QTY欄の左端（紫と橙の境）'], ['boundQtyEnd', '表の右端（橙の右）']];
+  const vDefs = [['itemLeft', '緑の帯の左端（品目欄の左）'], ['boundLeft', '緑と紫の境（SIZE欄の左端）'],
+                 ['boundDescQty', '紫と橙の境（QTY欄の左端）'], ['boundQtyEnd', '橙の帯の右端（表の右端）']];
   const vFixes = [];
   {
     // 4本の線を、検出した罫線のうち「左から順に別々の4本」に割り当てる（ずれの合計が最小になる組合せ）。
@@ -935,8 +935,8 @@ function analyzeRegionLayout(gray, w, h, state) {
     if (bestCombo) {
       vDefs.forEach(([key, label], i) => {
         const best = bestCombo[i], d = Math.abs(best - state[key]);
-        if (d > 0.004 && d <= 0.05) {
-          msgs.push({ level: 'warn', text: `${label}が罫線から ${(d * 100).toFixed(1)}% ずれています。近くの罫線は ${best.toFixed(4)} の位置です。`, fixes: [{ key, value: best }] });
+        if (d > 0.0025 && d <= 0.05) {
+          msgs.push({ level: 'warn', target: key, text: `${label}が罫線から ${(d * 100).toFixed(1)}% ずれています。近くの罫線は ${best.toFixed(4)} の位置です。`, fixes: [{ key, value: best }] });
           vFixes.push({ key, value: best });
         }
       });
@@ -949,8 +949,8 @@ function analyzeRegionLayout(gray, w, h, state) {
   if (topRules.length >= 2) {
     const hb = topRules[1];
     const diff = state.headerBottom - hb;
-    if (diff < -0.004) msgs.push({ level: 'warn', text: `上端の線が見出し行（ITEM/SIZE…）の文字にかかっています。見出しの下の罫線は ${hb.toFixed(4)} の位置（目安）です。見出しが材料の行として読まれる恐れがあります。`, fixes: [{ key: 'headerBottom', value: hb }] });
-    else if (diff > 0.02) msgs.push({ level: 'warn', text: `上端の線が低すぎます。見出しの下の罫線は ${hb.toFixed(4)} の位置（目安）です。1行目のデータが読まれない恐れがあります。`, fixes: [{ key: 'headerBottom', value: hb }] });
+    if (diff < -0.004) msgs.push({ level: 'warn', target: 'headerBottom', text: `青緑の上端の線が見出し行（ITEM/SIZE…）の文字にかかっています。見出しの下の罫線は ${hb.toFixed(4)} の位置（目安）です。見出しが材料の行として読まれる恐れがあります。`, fixes: [{ key: 'headerBottom', value: hb }] });
+    else if (diff > 0.005) msgs.push({ level: 'warn', target: 'headerBottom', text: `青緑の上端の線が見出しの下の罫線より ${(diff * 100).toFixed(1)}% 下にあります（罫線は ${hb.toFixed(4)} の位置・目安。表の1行は約1.6%）。1行目（PIPEなど）の上側が切れて読めない恐れがあります。`, fixes: [{ key: 'headerBottom', value: hb }] });
   }
 
   // 3) 表の下端が、表の罫線より大きく下（タイトル欄など）に入り込んでいないか
@@ -958,7 +958,7 @@ function analyzeRegionLayout(gray, w, h, state) {
   if (rulesInTable.length) {
     const lastRule = rulesInTable[rulesInTable.length - 1];
     if (lastRule < state.tableBottom - 0.06) {
-      msgs.push({ level: 'info', text: `表の下端の線（${state.tableBottom.toFixed(3)}）は、最後の罫線（${lastRule.toFixed(3)}）よりかなり下です。タイトル欄が範囲に入っていないか確認してください。`, fixes: [{ key: 'tableBottom', value: Math.min(1, lastRule + 0.005) }] });
+      msgs.push({ level: 'info', target: 'tableBottom', text: `青緑の下端の線（${state.tableBottom.toFixed(3)}）は、最後の罫線（${lastRule.toFixed(3)}）よりかなり下です。タイトル欄が範囲に入っていないか確認してください。`, fixes: [{ key: 'tableBottom', value: Math.min(1, lastRule + 0.005) }] });
     }
   }
 
@@ -975,16 +975,21 @@ function analyzeRegionLayout(gray, w, h, state) {
   if (ln) {
     const ir = inkRatio(ln);
     if (ln.y0 >= state.tableBottom - 0.01) {
-      msgs.push({ level: 'warn', text: `LINE No.の枠が表の下（タイトル欄）にあります。「TITLE」「CLIENT」などの見出し文字を読んでしまう恐れがあります（枠内の文字量 ${(ir * 100).toFixed(1)}%）。この様式にLINE No.欄が無い場合は、何も書かれていない場所へ移してください。` });
+      msgs.push({ level: 'warn', target: 'lineNoBox', text: `LINE No.（青い枠）が表の下（タイトル欄）にあります。「TITLE」「CLIENT」などの見出し文字を読んでしまう恐れがあります（枠内の文字量 ${(ir * 100).toFixed(1)}%）。この様式にLINE No.欄が無い場合は、何も書かれていない場所へ移してください。` });
     } else if (ir < 0.002) {
-      msgs.push({ level: 'info', text: 'LINE No.の枠の中に文字がほとんどありません。この様式にLINE No.欄が無い場合は問題ありません。' });
+      msgs.push({ level: 'info', target: 'lineNoBox', text: 'LINE No.（青い枠）の中に文字がほとんどありません。この様式にLINE No.欄が無い場合は問題ありません。' });
     }
-    if (dn && overlap(ln, dn)) msgs.push({ level: 'warn', text: 'LINE No.の枠とDRAWING No.の枠が重なっています。' });
+    if (dn && overlap(ln, dn)) msgs.push({ level: 'warn', target: 'lineNoBox', text: 'LINE No.（青い枠）とDRAWING No.（ピンクの枠）が重なっています。' });
   }
   if (dn) {
     const ir = inkRatio(dn);
-    if (ir < 0.004) msgs.push({ level: 'warn', text: `DRAWING No.の枠の中に文字がほとんどありません（${(ir * 100).toFixed(2)}%）。図面番号の位置から外れている可能性があります。` });
-    if ((dn.x1 - dn.x0) * (dn.y1 - dn.y0) > 0.12) msgs.push({ level: 'info', text: 'DRAWING No.の枠が広すぎます。他の文字を巻き込むと図面番号を誤読しやすくなります。' });
+    if (ir < 0.004) msgs.push({ level: 'warn', target: 'drawingNoBox', text: `DRAWING No.（ピンクの枠）の中に文字がほとんどありません（${(ir * 100).toFixed(2)}%）。図面番号の位置から外れている可能性があります。` });
+    const matBox = { x0: state.itemLeft, x1: state.boundQtyEnd, y0: state.headerBottom, y1: state.tableBottom };
+    const ox = Math.min(dn.x1, matBox.x1) - Math.max(dn.x0, matBox.x0), oy = Math.min(dn.y1, matBox.y1) - Math.max(dn.y0, matBox.y0);
+    if (ox > 0 && oy > 0 && (ox * oy) > 0.2 * (dn.x1 - dn.x0) * (dn.y1 - dn.y0)) {
+      msgs.push({ level: 'warn', target: 'drawingNoBox', text: 'DRAWING No.（ピンクの枠）が材料表（緑・紫・橙の帯）に重なっています。図面番号は表の下の「JOB No.」欄にあります。材料表の文字を読んでしまう恐れがあります。' });
+    }
+    if ((dn.x1 - dn.x0) * (dn.y1 - dn.y0) > 0.12) msgs.push({ level: 'info', target: 'drawingNoBox', text: 'DRAWING No.（ピンクの枠）が広すぎます。他の文字を巻き込むと図面番号を誤読しやすくなります。' });
   }
 
   if (!msgs.some(m => m.level === 'warn')) msgs.unshift({ level: 'ok', text: '縦線・上端の線は、罫線の位置とおおむね合っています。' });
@@ -1053,14 +1058,14 @@ function showOcrRegionEditorModal(canvas, dispW, dispH) {
   function makeVLine(id) {
     const el = document.createElement('div');
     el.id = id;
-    el.style.cssText = 'position:absolute; top:0; width:6px; height:100%; margin-left:-3px; cursor:ew-resize; background:rgba(0,0,0,0.35);';
+    el.style.cssText = 'position:absolute; top:0; width:10px; height:100%; margin-left:-5px; cursor:ew-resize; background:linear-gradient(to right, transparent 4.5px, rgba(0,0,0,0.75) 4.5px, rgba(0,0,0,0.75) 5.5px, transparent 5.5px);';
     stageWrap.appendChild(el);
     return el;
   }
   function makeHLine(id) {
     const el = document.createElement('div');
     el.id = id;
-    el.style.cssText = 'position:absolute; height:6px; margin-top:-3px; cursor:ns-resize; background:rgba(30,90,200,0.55);';
+    el.style.cssText = 'position:absolute; height:10px; margin-top:-5px; cursor:ns-resize; background:linear-gradient(to bottom, transparent 4.5px, rgba(0,131,143,0.95) 4.5px, rgba(0,131,143,0.95) 5.5px, transparent 5.5px);';
     stageWrap.appendChild(el);
     return el;
   }
@@ -1273,8 +1278,8 @@ function showOcrRegionEditorModal(canvas, dispW, dispH) {
 
   // --- v93：ずれの自動チェック表示 ---
   const checkWrap = document.createElement('div');
-  checkWrap.style.cssText = 'margin-top:12px; border:1px solid #D8DFE6; border-radius:8px; padding:8px 10px; background:#FAFBFC; font-size:12.5px;';
-  panel.appendChild(checkWrap);
+  checkWrap.style.cssText = 'margin:8px 0 12px; border:1px solid #D8DFE6; border-radius:8px; padding:8px 10px; background:#FAFBFC; font-size:12.5px;';
+  panel.insertBefore(checkWrap, stageWrap); // 図面の上（説明文の下）に表示
   let analysisGray = null, analysisW = 0, analysisH = 0;
   try {
     const aw = Math.min(1800, canvas.width);
@@ -1288,6 +1293,17 @@ function showOcrRegionEditorModal(canvas, dispW, dispH) {
     for (let i = 0, j = 0; i < data.length; i += 4, j++) analysisGray[j] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
     analysisW = aw; analysisH = ah;
   } catch (e) { analysisGray = null; }
+  // 画面上の帯・線・枠の色に合わせた表示色（読みやすいよう少し濃いめにしている）
+  const CHECK_TARGET_COLORS = {
+    itemLeft:     { color: '#2E7D32', name: '緑の帯' },
+    boundLeft:    { color: '#7A3ABE', name: '紫の帯' },
+    boundDescQty: { color: '#C06A0A', name: '橙の帯' },
+    boundQtyEnd:  { color: '#C06A0A', name: '橙の帯' },
+    headerBottom: { color: '#00838F', name: '青緑の上端の線' },
+    tableBottom:  { color: '#00838F', name: '青緑の下端の線' },
+    lineNoBox:    { color: '#1E5AC8', name: 'LINE No.（青い枠）' },
+    drawingNoBox: { color: '#BE3A7A', name: 'DRAWING No.（ピンクの枠）' }
+  };
   let lastCheckSig = '';
   function runLayoutCheck() {
     if (!analysisGray) { checkWrap.textContent = '自動チェックは、この環境では使えません。'; return; }
@@ -1310,7 +1326,18 @@ function showOcrRegionEditorModal(canvas, dispW, dispH) {
       icon.style.cssText = 'flex:none; width:1.2em; font-weight:700; color:' + (m.level === 'ok' ? '#2E8B57' : (m.level === 'warn' ? '#C0392B' : '#2E6DA4')) + ';';
       const txt = document.createElement('span');
       txt.textContent = m.text; txt.style.cssText = 'flex:1;';
-      row.appendChild(icon); row.appendChild(txt);
+      // 対象の線・枠と同じ色で表示（どこのことか分かりやすくする）
+      const tc = CHECK_TARGET_COLORS[m.target];
+      if (tc) {
+        txt.style.color = tc.color; txt.style.fontWeight = '600';
+        row.style.borderLeft = '4px solid ' + tc.color; row.style.paddingLeft = '6px';
+        const chip = document.createElement('span');
+        chip.textContent = tc.name;
+        chip.style.cssText = 'flex:none; font-size:11px; color:#fff; background:' + tc.color + '; border-radius:10px; padding:1px 8px; white-space:nowrap;';
+        row.appendChild(icon); row.appendChild(chip); row.appendChild(txt);
+      } else {
+        row.appendChild(icon); row.appendChild(txt);
+      }
       if (m.fixes && m.fixes.length) {
         const b = document.createElement('button');
         b.type = 'button'; b.className = 'ghost';
@@ -1330,8 +1357,8 @@ function showOcrRegionEditorModal(canvas, dispW, dispH) {
 
   // --- 保存済みプロファイルの管理UI ---
   const controlsRow = document.createElement('div');
-  controlsRow.style.cssText = 'display:flex; align-items:center; gap:8px; margin-top:14px; flex-wrap:wrap;';
-  panel.appendChild(controlsRow);
+  controlsRow.style.cssText = 'display:flex; align-items:center; gap:8px; margin:0 0 12px; flex-wrap:wrap;';
+  panel.insertBefore(controlsRow, stageWrap); // 図面の上（自動チェックの下）に表示
 
   const nameInput = document.createElement('input');
   nameInput.type = 'text';
@@ -2593,6 +2620,7 @@ async function analyzePage(pdf, pageNum) {
         console.groupCollapsed(`[材料表OCRデバッグ] page ${pageNum} / DRAWING No.(暫定) ${drawingNo || '(未検出)'}`);
         console.table(materials.map(m => ({
           品目_確定: m.item,
+          品目の決まり方: m.itemSource,
           品目取得元: String(m.readMethod || '').includes('テキスト抽出') ? 'テキスト' : 'OCR画像認識',
           ITEM欄_生OCR結果: m.itemRawOcrText,
           SIZE_DESC_生OCR結果: m.rawSizeDescOcrText,
@@ -2651,11 +2679,16 @@ async function analyzePage(pdf, pageNum) {
   }
 
   // v88：親図は、既知品目の行が2件以上ある場合のみ材料表ありとして採用、それ以外は破棄。
+  // v101：「材料表のページかどうか」の判定にだけ既知品目を使う。採用と決まったページでは、品目名が
+  //   辞書に無い行（サポート材・アンカーボルト・スタッドエンド・ネジキャップ・BALL等）や、ラベルが
+  //   読めず「(品目未検出)」になった行も捨てずに残す（従来は既知品目の行だけを残していたため、
+  //   100番台の図面で未登録品目の行が黙って消えていた）。読めなかった品目は画面で人が確認できる。
   if (series === '親図' && materials.length) {
     const knownKeysP = new Set(MATERIAL_ROW_DEFS.map(d => d.key));
     const knownRows = materials.filter(m => knownKeysP.has(m.item));
-    materials = knownRows.length >= 2 ? knownRows : [];
-    console.info(`[親図] page ${pageNum} / ${drawingNo}：既知品目 ${knownRows.length}行 → ${materials.length ? '材料表として採用' : '破棄'}`);
+    const totalRowsP = materials.length;
+    if (knownRows.length < 2) materials = [];
+    console.info(`[親図] page ${pageNum} / ${drawingNo}：全${totalRowsP}行中 既知品目 ${knownRows.length}行 → ${materials.length ? '材料表として採用（全' + materials.length + '行を残す）' : '破棄'}`);
   }
 
   // ボルト行を「サイズ＝◯A用／材質＝M16×55L SS400/SS400」の形にそろえる
@@ -3695,11 +3728,15 @@ function extractMaterials(annots, textContent, viewport, pageCanvas) {
 
   // ---- 行の帯（品目ラベルのY座標→隣接ラベルの中間点で境界決定） ----
   let anchors = [];
+  // v102：品目欄の外にあるテキスト（コンパスの「90°」等）を品目ラベルとして拾わないための範囲。
+  const _anchorTableTopY = Math.min(...Object.values(headerCandidates).map(h => h.y));
+  const _anchorBandLeft = bounds.boundLeft - Math.max(80, (bounds.boundSizeDesc - bounds.boundLeft) * 2.5);
   for (const it of textContent.items) {
     const s = (it.str || '').trim();
     for (const def of MATERIAL_ROW_DEFS) {
       if (def.test(s)) {
         const [vx, vy] = viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
+        if (vx >= bounds.boundLeft || (vx + (it.width || 0) / 2) < _anchorBandLeft || vy < _anchorTableTopY) break;
         anchors.push({ key: def.key, y: vy, x: vx, label: s });
         break;
       }
@@ -5512,6 +5549,19 @@ function dropEmptyPlaceholderRows(rows, droppedOut) {
 // DESCRIPTION欄も同じ高さでOCRし、1行分のデータとして復元を試みる。
 // 品目名はMATERIAL_ROW_DEFSとのゆるい照合のみ行い、一致しなければ「(品目未確定)」
 // として、SIZE/DESCRIPTION/QTYの中身だけでも出力に残す（品目名は人が見て直せる）。
+// v102：品目欄セル全体のOCR結果から、採用できる品目ラベル文字列を返す（無ければ''）。
+function itemLabelFromCellOcrText(cellText) {
+  const t = String(cellText || '').trim();
+  if (!t) return '';
+  if (MATERIAL_ROW_DEFS.some(def => def.test(t))) return t;
+  if (fuzzyMatchMaterialDef(t)) return t;
+  const found = new Map();
+  for (const tok of t.split(/\s+/).filter(Boolean)) {
+    const u = tok.toUpperCase();
+    for (const def of MATERIAL_ROW_DEFS) { if (def.test(u)) { found.set(def.key, u); break; } }
+  }
+  return found.size === 1 ? [...found.values()][0] : '';
+}
 function fuzzyMatchMaterialDef(text) {
   const t = String(text || '').trim();
   if (!t) return null;
@@ -5570,6 +5620,10 @@ function collectTextBasedItemBands(textContent, viewport, bounds, tableTopY, tab
     for (const def of MATERIAL_ROW_DEFS) {
       if (def.test(s)) {
         const [vx, vy] = viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
+        // v102：品目欄（ITEM列）の外にあるテキストは品目ラベルとして採用しない。
+        // 以前は位置を見ていなかったため、図面中のコンパス記号の「90°」等が「90°ELBOW」の
+        // ラベルとして登録され、表の上半分（PIPE〜FLANGE）の行が丸ごと90°ELBOWになっていた。
+        if (vx >= bounds.boundLeft || (vx + (it.width || 0) / 2) < itemLabelBandLeft || vy < tableTopY) break;
         anchors.push({ key: def.key, y: vy, x: vx, label: s });
         break;
       }
@@ -6164,8 +6218,12 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
                 (cBottom - cTop) <= (bandY1 - bandY0) * 2.6) ninteiFlag = true;
             if (cellText && /認定品/.test(String(cellText).normalize('NFKC')) &&
                 (cBottom - cTop) <= (bandY1 - bandY0) * 2.6) ninteiKind = '認定品'; // v75
-            if (cellText && hasMeaningfulChars(cellText) &&
-                MATERIAL_ROW_DEFS.some(def => def.test(cellText))) itemText = cellText;
+            // v102：完全一致だけでなく、「Con.」（大文字小文字違い）や縦書き文字の混入（「UCER Con.」等）
+            // も、断片のうち既知品目がちょうど1種類だけなら採用する。
+            if (cellText && hasMeaningfulChars(cellText)) {
+              const cellItemLabel = itemLabelFromCellOcrText(cellText);
+              if (cellItemLabel) itemText = cellItemLabel;
+            }
           }
         }
       } catch (e) { /* 従来の行単位OCRへ */ }
@@ -6332,6 +6390,12 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
     const hasAnyData = !labelLeakOnly && (!!band.qty || !!sizeText || hasMeaningfulChars(descFinal));
     if (!hasAnyData) continue;
 
+    // v97：品目名がどの経路で決まったかを記録（画面のツールチップ・コンソール表示用）。
+    const _itemExact = !!itemText && MATERIAL_ROW_DEFS.some(d => { try { return d.test(String(itemText).trim()); } catch (e) { return false; } });
+    const itemSource = cellLabel ? '罫線セル内のテキスト'
+      : (textBand ? 'テキスト帯'
+      : (imgMatchedItem ? '登録ラベル画像との照合'
+      : (itemText ? (_itemExact ? 'OCR(完全一致)' : (matchedDef ? 'OCR(あいまい一致)' : 'OCR(辞書に無い文字)')) : '読み取れず')));
     rows.push({
       item: matchedDef ? matchedDef.key : (itemText || '(品目未検出)'),
       size: sizeText,
@@ -6345,6 +6409,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
       ...(qtyRetried ? { lowConfidenceFields: ['QTY'] } : {}),
       sizeFromOcr: !!sizeText,
       descFromOcr: !!(descClean || descText),
+      itemSource,
       itemInherited: false,
       itemMatched: !!matchedDef,
       itemTextEmpty: !itemText, // このOCR枠から本当に何の文字も読み取れなかったか
@@ -6403,6 +6468,22 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
     });
   }
 
+  // v104：辞書に無い品目（例：サポート材）の結合セル救済。ラベルが上の行にしか掛かっておらず、
+  //   下の行（例：プレート）の品目欄が空になった場合、「同じ品目欄セルの中」で品目名が読めている
+  //   行（辞書外の名前でも可）から名前を借りる。別のセルからは借りない（品目名が化けるため）。
+  rows.forEach(row => {
+    if (row.item !== '(品目未検出)' || !row.itemTextEmpty || row.itemCellKey == null) return;
+    const donors = rows.filter(r => r !== row && r.itemCellKey === row.itemCellKey &&
+      !r.itemInherited && r.item && r.item !== '(品目未検出)' && !r.itemTextEmpty);
+    if (!donors.length) return;
+    const idx = rows.indexOf(row);
+    let nearest = donors[0];
+    for (const d of donors) { if (Math.abs(rows.indexOf(d) - idx) < Math.abs(rows.indexOf(nearest) - idx)) nearest = d; }
+    row.item = nearest.item;
+    row.itemInherited = true; // 画面で「結合セルから引き継いだ値」と分かる印が付く
+    row.itemInheritedFromRaw = nearest.itemRawOcrText;
+  });
+
   // v91：品目欄の罫線が検出できず(itemCellKey==null)、かつ品目名を他の行から借用した行だけを対象に、
   // 内容（SIZE/DESCRIPTION）から明らかに別の品目と分かる場合のみ補正する。
   // ・罫線が検出できて借用が確定している行、ラベルを直接読めた行には一切触れない（既存の挙動を維持）。
@@ -6410,10 +6491,17 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
   // ・TEEとレデューサー（A×B表記）のように内容だけでは区別できないものは、誤った品目を
   //   当てずに「(品目未検出)」として人が確認できるようにする。
   rows.forEach(row => {
-    if (!row.itemInherited || row.itemCellKey != null) return;
+    const guessy = row.itemSource === '登録ラベル画像との照合' || row.itemSource === 'OCR(あいまい一致)';
+    // v103：品目名がどうしても読めず「(品目未検出)」のまま残った行も、材質欄の内容から明らかに
+    //   判別できる場合（例：TP-A…BE→PIPE、JIS10K LF→FLANGE、V#…→GASKET）は補正する。
+    //   補正した行は紫の破線（要確認）で表示されるので、人が確認できる。
+    const undetected = row.item === '(品目未検出)';
+    if (!((row.itemInherited && row.itemCellKey == null) || guessy || undetected)) return;
     const fix = inferItemFromContentForInherited(row);
     if (fix && fix !== row.item) {
-      row.itemInheritedFromRaw = `${row.itemInheritedFromRaw || ''}→内容から補正(${row.item}→${fix})`;
+      row.itemInheritedFromRaw = `${row.itemInheritedFromRaw || row.itemRawOcrText || ''}→内容から補正(${row.item}→${fix})`;
+      row.itemSource = `${row.itemSource || ''}→内容から補正`;
+      row.itemInherited = true; // 画面で紫の破線＝要確認の印を付ける
       row.item = fix;
       if (fix !== '(品目未検出)') row.itemMatched = true;
     }
@@ -6428,7 +6516,19 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
     if (row.item !== before) row.itemMatched = true; // 内容から確定した品目なので、引き継ぎ処理の対象外にする
   });
 
-  return rows;
+  // v105：改訂マーク（雲形＋◇①）がQTY欄にかかると、「①」が数量「1」と読まれ、サイズも材質も無く
+  //   数量だけの偽の行ができる（例：PIPE枠の最終行に「(品目未検出) / 数量1」）。
+  //   本物の行には必ずサイズか材質があるため、「サイズ・材質が両方空」かつ「品目名を自分で読めて
+  //   いない（未検出／他の行から借用）」行は、改訂マーク等のノイズとみなして除外する。
+  return rows.filter(row => {
+    const noContent = !hasMeaningfulChars(row.size) && !hasMeaningfulChars(row.description);
+    const itemNotReadItself = row.item === '(品目未検出)' || row.itemInherited || row.itemTextEmpty;
+    if (noContent && itemNotReadItself) {
+      console.info(`[数量だけの行を除外] 品目=${row.item} 数量=${row.qty} Y=${row.debugQtyY != null ? Math.round(row.debugQtyY * 10) / 10 : ''}（改訂マーク等のノイズの可能性）`);
+      return false;
+    }
+    return true;
+  });
 }
 
 // SIZE〜DESCRIPTIONをまとめてOCRした1行分の文字列から、先頭のSIZE表記を切り出す。
@@ -7491,11 +7591,12 @@ function renderPreview() {
                   ? 'background:#FFF6E5; outline:2px dashed #E8890C; outline-offset:-2px;'
                   : (autoFixedCols.has(def.col) ? 'background:#E3F3E3;' : '')));
           const dictStyle = dictFixed ? 'color:#C0392B; font-weight:700;' : '';
-          const title = isInheritedItemCell
+          const _srcNote = (def.col === 'K' && r.itemSource) ? `【品目名の決まり方：${r.itemSource}／ITEM欄のOCR生結果：「${escapeHtml(r.itemRawOcrText || '')}」】 ` : '';
+          const title = _srcNote + (isInheritedItemCell
             ? `この品目名はこの行自体からは読み取れず、近くの行（読み取れた表記：「${escapeHtml(r.itemInheritedFromRaw || '')}」）から引き継いだ推定値です。品目ラベルが複数行にまたがる結合セルのテンプレートで起きやすく、実際の品目と異なる場合があります。図面と見比べてご確認ください。`
             : (dictFixed
               ? `マイ辞書により自動修正されました：${escapeHtml(dictFixed.from)} → ${escapeHtml(dictFixed.to)}（誤りの場合はここをクリックして直接修正してください）`
-              : 'クリックして直接修正できます（修正内容はマイ辞書に保存され、次回から自動反映されます）');
+              : 'クリックして直接修正できます（修正内容はマイ辞書に保存され、次回から自動反映されます）'));
           return `<td class="mono editable-material" contenteditable="true" spellcheck="false"
               style="${bgStyle}${dictStyle}"
               data-row-id="${escapeHtml(r.rowId)}" data-field="${field}" data-item="${escapeHtml(itemScope)}"
