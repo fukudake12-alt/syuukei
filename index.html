@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>図面別 支給品・転用品・既設転用 集計ツール（高精度OCR版 v107）</title>
+<title>図面別 支給品・転用品・既設転用 集計ツール（高精度OCR版 v105）</title>
 <script src="libs/pdf.min.js"></script>
 <script src="libs/exceljs.min.js"></script>
 <script src="libs/ort.min.js"></script>
@@ -148,9 +148,6 @@
   /* v40で追加：ITEM欄が読み取れず近くの行から品目名を引き継いだ行の目印（左端に紫の帯）。
      背景・枠線自体はK列セルにoutlineで個別に付くため、ここでは行の左端の帯だけ追加する。*/
   tbody tr.item-inherited-row td:first-child{ border-left:4px solid #6A3AA0; }
-  /* v106テスト：品目名と行の内容（数量・サイズ）が矛盾している行の目印（左端に赤の帯）。
-     品目名の決まり方（直接読めた／引き継ぎ／あいまい一致）に関係なく、全行を対象にする。 */
-  tbody tr.item-conflict-row td:first-child{ border-left:4px solid #C0152F; }
   /* v12で追加：「要確認」欄のリンクから該当行にジャンプした時、一瞬だけ黄色くフラッシュさせて
      「ここです」と分かるようにする。 */
   @keyframes rowFlash{ 0%{ background:#FFF3B0; } 100%{ background:transparent; } }
@@ -304,10 +301,7 @@
   <div class="panel" id="panelPdfLoad">
     <h2>1. PDF読み込み <button type="button" class="ghost collapse-btn" id="btnTogglePdfPanel">▲ 折りたたむ</button></h2>
     <div class="row">
-      <label class="ocr-toggle"><input type="checkbox" id="ocrEnabled"> OCRで読み取る</label>
-      <span style="font-size:11.5px; color:#6b7680;" id="readModeNote">ON＝画像だけで読取（PDF内の文字は使わない）／OFF＝PDF内の文字だけで読取（OCRは使わない）</span>
-      <label class="ocr-toggle" style="margin-left:14px;"><input type="checkbox" id="includeNon200"> 200番台以外の図面も集計する</label>
-      <span style="font-size:11.5px; color:#6b7680;">OFF＝200番台のアイソメ図だけ集計（親図・600番台以降などの材料表は読まない）／ON＝200番台以外も材料表があれば集計</span>
+      <label class="ocr-toggle"><input type="checkbox" id="ocrEnabled"> OCR補完を使う</label>
       <span style="display:flex; align-items:center; gap:6px; font-size:12.5px;">
         <label for="ocrRegionProfileSelect" style="color:#5a6570;">客先プロファイル:</label>
         <select id="ocrRegionProfileSelect" style="font-size:12.5px; padding:3px 6px; border-radius:6px; border:1px solid #C7D0D8;">
@@ -789,19 +783,6 @@ let currentPageOcrIssues = [];
 function isOcrEnabled() {
   const checkbox = document.getElementById('ocrEnabled');
   return !checkbox || checkbox.checked;
-}
-
-// v106：読み取り方式の分離。
-// 　OCR ON ＝ 画像だけで読み取る（PDF内の文字データは材料表・図面欄の位置決めや品目名に使わない）。
-// 　OCR OFF ＝ PDF内の文字データだけで読み取る（OCRは使わない）。
-// 以前は「OCR ON」でも品目名・見出し位置・表の下端・認定弁などの印付けにPDFの文字データを
-// 併用しており、どちらの経路で読まれた結果か分かりにくく、片方を直してももう片方に
-// 反映されない原因になっていた。従来の併用動作に戻したい場合は true にする。
-const OCR_MODE_USES_PDF_TEXT = false;
-// 現在の読み取り方式に応じて、位置決め・品目判定に使ってよいPDF文字データを返す
-// （OCR ONで併用しない設定のときは、文字データが無いものとして扱う空の内容を返す）。
-function textForCurrentMode(textContent) {
-  return (isOcrEnabled() && !OCR_MODE_USES_PDF_TEXT) ? { items: [] } : textContent;
 }
 
 // ============================================================
@@ -2610,7 +2591,7 @@ async function analyzePage(pdf, pageNum) {
       const titlePageCanvas = await renderPageForOcr(page);
       await withTimeout(ensureOcrEngine(), 60000, 'OCRエンジンの起動');
       const ocrResult = await ocrTitleBlockFallback(
-        page, titlePageCanvas, textForCurrentMode(textContent), viewport, ph,
+        page, titlePageCanvas, textContent, viewport, ph,
         { drawingNo: true, lineNo: true, lawCode: true }
       );
       if (ocrResult.drawingNo) {
@@ -2631,8 +2612,7 @@ async function analyzePage(pdf, pageNum) {
         // あった。OCR ON時にテキスト側へフォールバックする方針自体は変えず（OCR結果を
         // 常に最優先する）、OCRで何も検出できなかった場合に限り、保険としてテキスト層からの
         // 判定も試す。
-        // v106：OCR ONではPDFの文字データを使わない（併用したい場合はOCR_MODE_USES_PDF_TEXTをtrueにする）
-        const textLawCode = OCR_MODE_USES_PDF_TEXT ? lawToCode(searchText) : 'N';
+        const textLawCode = lawToCode(searchText);
         if (textLawCode !== 'N') { lawCode = textLawCode; }
       }
     } catch (e) {
@@ -2682,12 +2662,9 @@ async function analyzePage(pdf, pageNum) {
   // （OCRは一切動かない）。
   let materials = [];
   let unreadItems = [];
-  let materialsSkippedBySeries = false;
-  if (MATERIAL_SKIP_SERIES.includes(series) || !shouldReadMaterialsForSeries(series)) {
-    // 200番台以外の図面（「200番台以外の図面も集計する」がOFFのとき）：材料表の読み取り
-    // （テキスト・OCRとも）を行わない。
+  if (MATERIAL_SKIP_SERIES.includes(series)) {
+    // 親図など、材料表の無い図面：材料表の読み取り（テキスト・OCRとも）を行わない。
     materials = [];
-    materialsSkippedBySeries = true;
     console.info(`[材料表スキップ] page ${pageNum} / DRAWING No. ${drawingNo}（${series}のため材料表は読み取りません）`);
   } else if (isOcrEnabled()) {
     try {
@@ -2732,10 +2709,10 @@ async function analyzePage(pdf, pageNum) {
     materials = dropEmptyPlaceholderRows(materials, unreadItems);
   }
 
-  markCertifiedValves(materials, textForCurrentMode(textContent), viewport); // v72：「（認定弁）」の印付け
-  markCertifiedProducts(materials, textForCurrentMode(textContent), viewport); // v75：「OR（認定品）」等、弁以外の認定品の印付け
+  markCertifiedValves(materials, textContent, viewport); // v72：「（認定弁）」の印付け
+  markCertifiedProducts(materials, textContent, viewport); // v75：「OR（認定品）」等、弁以外の認定品の印付け
   materials = fixBossPlugRows(materials);   // v73：ボス／プラグ共有枠の行振り分け補正
-  markFlangeForm(materials, textForCurrentMode(textContent), viewport); // v84：FLANGEの「(A形)」の印付け
+  markFlangeForm(materials, textContent, viewport); // v84：FLANGEの「(A形)」の印付け
   materials = fixBfNoteText(materials);     // v84：BF加工品の注記が「BOSS」で途切れる不具合の補正
   materials = mergeBfNoteRows(materials);   // v73：BF加工品の注記行を前の行に統合
   materials = dropLineNoLeakRows(materials); // v80：LINE No.の値が材料の行として混入したものを除去
@@ -2796,7 +2773,7 @@ async function analyzePage(pdf, pageNum) {
   return {
     pageIndex: pageNum - 1, drawingNo, lawCode, issueDate, series,
     jobNo, projectName, lineNo, tag, filename, status, cls, materials,
-    ocrIssues, hasOcrHardFailure, unreadItems, materialsSkippedBySeries
+    ocrIssues, hasOcrHardFailure, unreadItems
   };
 }
 
@@ -3150,23 +3127,9 @@ function extractPipeAndGasketClass(lineNo) {
 // ※図面番号が読めなかったページ（図書リスト）と、番号が600番台以上・形式不明のページは、
 //   アイソメ図の番号読み取り失敗の可能性もあるため、対象外にせず従来どおり読み取る。
 // v88：親図(100番台)でも材料表付きの図面があるため、番号だけでのスキップをやめた。
-// v107：既定は200番台のみ集計に戻した。200番台以外は、画面のチェックボックスをONにしたときだけ
-//       集計する（判定は shouldReadMaterialsForSeries）。ONのときは下記v88の判定が働く。
 // 代わりに読み取り後、既知品目(PIPE/ELBOW/FLANGE等)の行が2件以上ある場合だけ「材料表あり」と
 // 判定し、無ければ結果を破棄する（親図で別の表が材料行と誤認される問題の対策）。
 const MATERIAL_SKIP_SERIES = [];
-
-// v107：材料表を集計する図面の種別の判定。
-// 　チェックOFF（既定）＝ 200番台のアイソメ図（図面番号の末尾が200〜599）だけ集計する。
-// 　チェックON ＝ 200番台以外（親図・600番台以降・形式不明）も、材料表があれば集計する。
-// ※図面番号が読めなかったページ（種別「図書リスト」）は、アイソメ図の番号の読み取り失敗の
-//   可能性があるため、チェックOFFでも従来どおり読み取る（読めた行は「図面番号(未検出)」で
-//   表示されるので、読み取り失敗に気づける）。
-function shouldReadMaterialsForSeries(series) {
-  const cb = document.getElementById('includeNon200');
-  if (cb && cb.checked) return true;
-  return series === 'アイソメ' || series === '図書リスト';
-}
 
 function getDrawingSeries(drawingNo) {
   if (!drawingNo) return '図書リスト';
@@ -3637,13 +3600,6 @@ async function ocrTitleBlockFallback(page, pageCanvas, textContent, viewport, ph
 // のマトリクス様式。品目ラベルのY座標を基準に行の帯を作り、そこに落ちる注釈をX座標で
 // 列判定して紐付ける。テンプレートの多少のズレに耐えられるよう、見出し(ITEM/SIZE/
 // DESCRIPTION/QTY)の実際の位置から列境界を都度計算する。
-// v107：品目ラベルの表記ゆれ対策。全角英数（ＰＩＰＥ）・互換文字などを半角に揃え、前後の空白と
-// 幅ゼロの文字を除いてから判定する。以前は完全一致のみで、見た目が同じでも文字コードが違う
-// だけでラベルが検出できず、その品目の行が隣の品目に吸収される原因になっていた。
-function normalizeLabelText(str) {
-  return String(str == null ? '' : str).normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
-}
-
 const MATERIAL_ROW_DEFS = [
   { key: 'PIPE',         test: s => s === 'PIPE' },
   { key: '90°ELBOW',     test: s => s === '90°' },
@@ -3833,7 +3789,7 @@ function extractMaterials(annots, textContent, viewport, pageCanvas) {
   const _anchorTableTopY = Math.min(...Object.values(headerCandidates).map(h => h.y));
   const _anchorBandLeft = bounds.boundLeft - Math.max(80, (bounds.boundSizeDesc - bounds.boundLeft) * 2.5);
   for (const it of textContent.items) {
-    const s = normalizeLabelText(it.str);
+    const s = (it.str || '').trim();
     for (const def of MATERIAL_ROW_DEFS) {
       if (def.test(s)) {
         const [vx, vy] = viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
@@ -4122,16 +4078,7 @@ function extractMaterials(annots, textContent, viewport, pageCanvas) {
     ? Math.max(3, Math.min(avgH * 0.6, medianRowGap * 0.5))
     : Math.max(3, avgH * 0.6);
 
-  const _rows = rowsFromCells(cells, bands, bounds, rowYTolerance);
-  // v107：材料表の先頭は必ずPIPEの行。PIPEの見出しが検出できないと、表の先頭から最初に見つかった
-  // 品目の見出しまでが丸ごとその品目（例：90°ELBOW）の行として扱われる。この状態を検出し、
-  // 該当行に目印を付ける（値は書き換えない）。
-  if (Array.isArray(_rows) && bands.length && !bands.some(b => b.key === 'PIPE')) {
-    const firstKey = bands[0].key;
-    for (const r of _rows) { if (r && r.item === firstKey) r.itemBandSuspect = true; }
-    console.warn('[v107] PIPEの見出しを検出できませんでした。先頭の品目（' + firstKey + '）の行を要確認にしました。');
-  }
-  return _rows;
+  return rowsFromCells(cells, bands, bounds, rowYTolerance);
 }
 
 // ============================================================
@@ -5726,7 +5673,7 @@ function fuzzyMatchMaterialDef(text) {
 function collectTextBasedItemBands(textContent, viewport, bounds, tableTopY, tableHeaderBottomY, itemLabelBandLeft) {
   let anchors = [];
   for (const it of textContent.items) {
-    const s = normalizeLabelText(it.str);
+    const s = (it.str || '').trim();
     for (const def of MATERIAL_ROW_DEFS) {
       if (def.test(s)) {
         const [vx, vy] = viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
@@ -6063,7 +6010,6 @@ function constrainBandToCell(y, cellLines, textItemBands, currentBand) {
 }
 
 async function scanQtyColumnForMissingRows(page, textContent, viewport) {
-  textContent = textForCurrentMode(textContent); // v106：OCR ONではPDFの文字データを位置決め・品目名に使わない（見出し位置・表の下端・品目ラベルは画像と読み取り範囲の設定から決める）
   const headerCandidates = {};
   for (const it of textContent.items) {
     const s = (it.str || '').trim();
@@ -6197,7 +6143,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
         const qtyText = normalizeWidthAndSpaces(await recognizeQtyCell(pageCanvas, { x0: bounds.boundDescQty, x1: bounds.boundQtyEnd, y0: band.y0, y1: band.y1 }));
         const nums = qtyText.match(QTY_NUMERIC_PATTERN);
         if (nums && nums.length) qty = nums[nums.length - 1];
-      } catch (e) { logOcrIssue('数量(QTY欄)の読み取りに失敗した行があります', e); /* この行の数量が読めなくても他の項目は出力を試みる */ }
+      } catch (e) { /* この行の数量が読めなくても他の項目は出力を試みる */ }
       rowBands.push({ bandY0: band.y0, bandY1: band.y1, qty, qtyY: (band.y0 + band.y1) / 2 });
     }
   } else {
@@ -6343,7 +6289,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
           const itemCrop = cropForOcr(pageCanvas, { x0: itemLabelBandLeft, x1: bounds.boundLeft, y0: bandY0, y1: bandY1 });
           itemText = stripHeaderLeak(normalizeWidthAndSpaces(await recognizeCrop(itemCrop)));
         }
-      } catch (e) { logOcrIssue('品目名(ITEM欄)の読み取りに失敗した行があります', e); /* 品目名が読めなくても他の項目は出力を試みる */ }
+      } catch (e) { /* 品目名が読めなくても他の項目は出力を試みる */ }
       // v52で追加：罫線ベースの行区切り（v48）は1行分ぴったりの帯でITEM欄を切り出すため、
       // 品目ラベルが2行にまたがるセルの真ん中あたりに印字されている場合（例：FLANGEの
       // 50A行・15A行のちょうど中間にラベルがある等）、どちらの1行分の帯にもラベルの
@@ -6386,7 +6332,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
       const split = splitSizeAndDescriptionOcr(rawSizeDesc);
       sizeText = cleanOcrSize(split.size);
       descText = split.description;
-    } catch (e) { logOcrIssue('SIZE/DESCRIPTION欄の読み取りに失敗した行があります', e); }
+    } catch (e) { /* noop */ }
 
     // v41で追加：テキスト帯で品目が確定している場合はそれを最優先で使う（辞書に無い
     // 未知品目名がテキストとして印字されているケースも、そのままの表記を品目名として
@@ -6722,35 +6668,6 @@ function inferItemFromContentForInherited(row) {
   if (cur === 'GASKET' && guess === 'FLANGE') return '';
   if (cur === 'BLIND FLANGE' && guess === 'FLANGE') return '';
   return guess;
-}
-
-// v106（テスト）：品目名と行の内容の「矛盾チェック」。全行が対象で、値は書き換えず、画面で警告するだけ。
-// 背景：これまでの補正（v91/v103）は「引き継いだ行」「あいまい一致の行」「未検出の行」だけが対象で、
-// 品目名が一度「確定」扱いになった行（例：PIPEなのに90°ELBOWと確定した行）は、内容と矛盾していても
-// 誰もチェックしていなかった。品目名の決まり方に関係なく、内容から見て“あり得ない”組み合わせだけを拾う。
-// 誤警告を増やさないよう、確実に言える矛盾だけに絞っている。
-const ITEM_CONFLICT_COUNT_ITEMS = new Set(['90°ELBOW', '45°ELBOW', 'TEE', 'CON.REDUCER', 'ECC.REDUCER', 'FLANGE', 'GASKET']);
-function detectItemContentConflict(row) {
-  try {
-    if (!row || !row.item || row.item === '(品目未検出)') return null;
-    if (row.cellOverrides && Object.prototype.hasOwnProperty.call(row.cellOverrides, 'K')) return null; // 人が直接直した品目名は対象外
-    const item = row.item;
-    const qtyStr = String(row.qty == null ? '' : row.qty).trim();
-    const sizeStr = String(row.size || '').normalize('NFKC').replace(/\s/g, '');
-    // 規則1：継手・フランジ・ガスケットは「個数」なので小数にならない。小数はPIPEの長さ[m]の特徴。
-    if (ITEM_CONFLICT_COUNT_ITEMS.has(item) && /^\d+\.\d+$/.test(qtyStr) && Number(qtyStr) !== Math.floor(Number(qtyStr))) {
-      return { reason: `数量が小数（${qtyStr}）です。${item}は個数のため小数にならず、PIPE（長さ[m]）の行の可能性があります。`, suggest: 'PIPE' };
-    }
-    // 規則3（v107）：表の先頭のPIPEの見出しが検出できず、最初の品目の行にまとめられた可能性がある行。
-    if (row.itemBandSuspect) {
-      return { reason: '表の先頭にあるはずのPIPEの見出しが検出できなかったため、この行が' + item + 'として扱われた可能性があります（実際はPIPEの行かもしれません）。', suggest: 'PIPE' };
-    }
-    // 規則2：エルボのサイズに「A×B」（2口径表記）はあり得ない（TEE／レデューサーの表記）。
-    if ((item === '90°ELBOW' || item === '45°ELBOW') && /^\d+(?:\.\d+)?A?[×xX]\d+(?:\.\d+)?A?$/.test(sizeStr)) {
-      return { reason: `サイズが2口径表記（${row.size}）です。エルボではなくTEEまたはレデューサーの可能性があります。`, suggest: '' };
-    }
-  } catch (e) { /* チェック自体の失敗で表示を止めない */ }
-  return null;
 }
 
 async function enhanceRowsWithOCR(page, rows) {
@@ -7451,7 +7368,7 @@ function renderPreview() {
   // 確実に材料表が存在しない正常なページであるため、この一覧への計上対象から外す
   // （ノイズが多く、確認の役に立たないため）。「アイソメ」「要確認」「不明」に
   // 分類される、本来は材料表があるはずのページだけを一覧に残す。
-  const noMaterialPages = pageData.filter(e => !e.readFailed && !e.hasOcrHardFailure && (!e.materials || !e.materials.length) && !e.materialsSkippedBySeries && !['親図', '図書リスト'].includes(getDrawingSeries(e.drawingNo)));
+  const noMaterialPages = pageData.filter(e => !e.readFailed && !e.hasOcrHardFailure && (!e.materials || !e.materials.length) && !['親図', '図書リスト'].includes(getDrawingSeries(e.drawingNo)));
   // v7で追加：材料表自体は見つかったが、その中の一部の品目（例：GASKET等の枠だけ）が
   // OCRでも最後まで読み取れず、行ごと出力から除外されたページ。「元々未使用の品目だった」
   // 可能性もあるが、「本来は記入があるのに読み取れなかった」可能性も否定できないため、
@@ -7482,31 +7399,6 @@ function renderPreview() {
             ${[...new Set(e.ocrIssues || [])].slice(0, 5).map(msg => `<li>${escapeHtml(msg)}</li>`).join('')}
           </ul>
         </li>`).join('')}
-      </ul>
-    </div>`;
-  }
-
-  // v107：200番台以外のため材料表を集計しなかったページの案内（「200番台以外の図面も集計する」がOFFのとき）。
-  const seriesSkippedPages = pageData.filter(e => !e.readFailed && e.materialsSkippedBySeries);
-  if (seriesSkippedPages.length) {
-    html += `<div class="note">
-      <strong>200番台以外の図面のため、材料表を集計していないページが${seriesSkippedPages.length}件あります。</strong>
-      これらの図面も集計する場合は、「200番台以外の図面も集計する」にチェックを入れて、もう一度読み取ってください。
-      <ul style="margin:8px 0 0; padding-left:18px;">
-        ${seriesSkippedPages.slice(0, 20).map(e => `<li>${escapeHtml(formatPageLabel(e))}${e.drawingNo ? '（' + escapeHtml(e.drawingNo) + '）' : ''}</li>`).join('')}
-        ${seriesSkippedPages.length > 20 ? `<li>…ほか${seriesSkippedPages.length - 20}件</li>` : ''}
-      </ul>
-    </div>`;
-  }
-
-  // v107：一部の欄だけ読み取りに失敗した行があるページ（全体エラーではないため従来は表に出なかった）。
-  const ocrPartialPages = pageData.filter(e => !e.readFailed && !e.hasOcrHardFailure && e.ocrIssues && e.ocrIssues.length);
-  if (ocrPartialPages.length) {
-    html += `<div class="note" style="background:var(--warn-bg); border-color:#E8C77A; color:#7a5a12;">
-      <strong>一部の欄でOCRの読み取りに失敗した行があるページが${ocrPartialPages.length}件あります。</strong>
-      該当行は空欄になっている可能性があるため、図面と見比べてご確認ください。
-      <ul style="margin:8px 0 0; padding-left:18px;">
-        ${ocrPartialPages.map(e => `<li>${escapeHtml(formatPageLabel(e))}${e.drawingNo ? '（' + escapeHtml(e.drawingNo) + '）' : ''}：${[...new Set(e.ocrIssues.map(m => String(m).split(':')[0]))].slice(0, 3).map(escapeHtml).join('／')}</li>`).join('')}
       </ul>
     </div>`;
   }
@@ -7667,9 +7559,8 @@ function renderPreview() {
     // PIPE・TEEのように品目ラベルが結合セルで印字されているテンプレートで、本来の
     // 品目名が別の品目名に静かに置き換わっていても気付けない不具合があった。
     const hasItemInherited = !!r.itemInherited;
-    const itemConflict = detectItemContentConflict(r); // v106テスト：品目名と内容の矛盾（全行対象）
     const trStyle = r.newDrawing ? ' style="border-top:3px solid var(--navy);"' : '';
-    const trClasses = [isOcr ? 'ocr-row' : '', hasSpecWarning ? 'spec-warn-row' : '', hasAutoFixed ? 'auto-fixed-row' : '', hasLowConfidence ? 'low-confidence-row' : '', hasItemInherited ? 'item-inherited-row' : '', itemConflict ? 'item-conflict-row' : ''].filter(Boolean).join(' ');
+    const trClasses = [isOcr ? 'ocr-row' : '', hasSpecWarning ? 'spec-warn-row' : '', hasAutoFixed ? 'auto-fixed-row' : '', hasLowConfidence ? 'low-confidence-row' : '', hasItemInherited ? 'item-inherited-row' : ''].filter(Boolean).join(' ');
     // テスト機能：自動修正された項目が、サイズ(L)・材質(M)のどちらの列に影響したかを
     // 判定し、実際に値が表示されているそのセル自体も色付けする（表の見た目上、
     // 「どこが直ったか」がY列を見なくても分かるようにするため）。
@@ -7749,10 +7640,7 @@ function renderPreview() {
           const itemScope = def.col === 'K' ? '' : r.item;
           const dictFixed = dictFixedMap.get(def.col);
           const isInheritedItemCell = def.col === 'K' && r.itemInherited;
-          const isConflictItemCell = def.col === 'K' && !!itemConflict;
-          const bgStyle = isConflictItemCell
-            ? 'background:#FDE4E8; outline:3px solid #C0152F; outline-offset:-3px;'
-            : isInheritedItemCell
+          const bgStyle = isInheritedItemCell
             ? 'background:#F1E6FA; outline:2px dashed #6A3AA0; outline-offset:-2px;'
             : (lowConfCols.has(def.col)
               ? 'background:#FDECEC; outline:2px solid #D9534F; outline-offset:-2px;'
@@ -7761,9 +7649,7 @@ function renderPreview() {
                   : (autoFixedCols.has(def.col) ? 'background:#E3F3E3;' : '')));
           const dictStyle = dictFixed ? 'color:#C0392B; font-weight:700;' : '';
           const _srcNote = (def.col === 'K' && r.itemSource) ? `【品目名の決まり方：${r.itemSource}／ITEM欄のOCR生結果：「${escapeHtml(r.itemRawOcrText || '')}」】 ` : '';
-          const title = _srcNote + (isConflictItemCell
-            ? `【要確認：品目名と内容が矛盾】${escapeHtml(itemConflict.reason)}図面と見比べてご確認ください。`
-            : isInheritedItemCell
+          const title = _srcNote + (isInheritedItemCell
             ? `この品目名はこの行自体からは読み取れず、近くの行（読み取れた表記：「${escapeHtml(r.itemInheritedFromRaw || '')}」）から引き継いだ推定値です。品目ラベルが複数行にまたがる結合セルのテンプレートで起きやすく、実際の品目と異なる場合があります。図面と見比べてご確認ください。`
             : (dictFixed
               ? `マイ辞書により自動修正されました：${escapeHtml(dictFixed.from)} → ${escapeHtml(dictFixed.to)}（誤りの場合はここをクリックして直接修正してください）`
