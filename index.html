@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>図面別 支給品・転用品・既設転用 集計ツール（高精度OCR版 v105）</title>
+<title>図面別 支給品・転用品・既設転用 集計ツール（高精度OCR版 v129）</title>
 <script src="libs/pdf.min.js"></script>
 <script src="libs/exceljs.min.js"></script>
 <script src="libs/ort.min.js"></script>
@@ -148,6 +148,9 @@
   /* v40で追加：ITEM欄が読み取れず近くの行から品目名を引き継いだ行の目印（左端に紫の帯）。
      背景・枠線自体はK列セルにoutlineで個別に付くため、ここでは行の左端の帯だけ追加する。*/
   tbody tr.item-inherited-row td:first-child{ border-left:4px solid #6A3AA0; }
+  /* v106テスト：品目名と行の内容（数量・サイズ）が矛盾している行の目印（左端に赤の帯）。
+     品目名の決まり方（直接読めた／引き継ぎ／あいまい一致）に関係なく、全行を対象にする。 */
+  tbody tr.item-conflict-row td:first-child{ border-left:4px solid #C0152F; }
   /* v12で追加：「要確認」欄のリンクから該当行にジャンプした時、一瞬だけ黄色くフラッシュさせて
      「ここです」と分かるようにする。 */
   @keyframes rowFlash{ 0%{ background:#FFF3B0; } 100%{ background:transparent; } }
@@ -301,7 +304,10 @@
   <div class="panel" id="panelPdfLoad">
     <h2>1. PDF読み込み <button type="button" class="ghost collapse-btn" id="btnTogglePdfPanel">▲ 折りたたむ</button></h2>
     <div class="row">
-      <label class="ocr-toggle"><input type="checkbox" id="ocrEnabled"> OCR補完を使う</label>
+      <label class="ocr-toggle"><input type="checkbox" id="ocrEnabled"> OCRで読み取る</label>
+      <span style="font-size:11.5px; color:#6b7680;" id="readModeNote">ON＝画像だけで読取（PDF内の文字は使わない）／OFF＝PDF内の文字だけで読取（OCRは使わない）</span>
+      <label class="ocr-toggle" style="margin-left:14px;"><input type="checkbox" id="includeNon200"> 200番台以外の図面も集計する</label>
+      <span style="font-size:11.5px; color:#6b7680;">OFF＝200番台のアイソメ図だけ集計（親図・600番台以降などの材料表は読まない）／ON＝200番台以外も材料表があれば集計</span>
       <span style="display:flex; align-items:center; gap:6px; font-size:12.5px;">
         <label for="ocrRegionProfileSelect" style="color:#5a6570;">客先プロファイル:</label>
         <select id="ocrRegionProfileSelect" style="font-size:12.5px; padding:3px 6px; border-radius:6px; border:1px solid #C7D0D8;">
@@ -321,6 +327,7 @@
         フォルダごとドラッグ＆ドロップ（サブフォルダ内のPDFも自動で拾います）、またはクリックしてPDFファイルを選択（複数可）
         <div class="fname" id="dropFileName"></div>
       </div>
+      <div id="selectedFilesList" style="display:none; width:100%; margin-top:6px; font-size:12.5px;"></div>
       <input type="file" id="fileInput" accept="application/pdf" multiple>
       <input type="file" id="folderInput" webkitdirectory multiple style="display:none;">
     </div>
@@ -331,6 +338,7 @@
     <div class="row">
       <button id="btnAnalyze" disabled>解析開始（新規）</button>
       <button class="ghost" id="btnAnalyzeAppend" disabled type="button">解析して追加</button>
+      <button class="ghost" id="btnClearSelection" disabled type="button" title="ドラッグ＆ドロップ／選択したファイルを取り消します（解析済みの結果は消えません）">選択をクリア</button>
       <button class="ghost" id="btnCancelAnalyze" type="button" style="display:none;">読み取り中止</button>
       <span class="status" id="statusText"></span>
     </div>
@@ -339,6 +347,7 @@
 
   <div class="panel">
     <h2>2. 出力プレビュー</h2>
+    <div id="loadedFilesBar" style="display:none; margin:0 0 10px; padding:8px 10px; background:#F4F7FA; border:1px solid #D5DEE7; border-radius:8px; font-size:12.5px;"></div>
     <div id="previewWrap">
       <div class="empty">PDFを読み込み、解析を実行してください。</div>
     </div>
@@ -783,6 +792,19 @@ let currentPageOcrIssues = [];
 function isOcrEnabled() {
   const checkbox = document.getElementById('ocrEnabled');
   return !checkbox || checkbox.checked;
+}
+
+// v106：読み取り方式の分離。
+// 　OCR ON ＝ 画像だけで読み取る（PDF内の文字データは材料表・図面欄の位置決めや品目名に使わない）。
+// 　OCR OFF ＝ PDF内の文字データだけで読み取る（OCRは使わない）。
+// 以前は「OCR ON」でも品目名・見出し位置・表の下端・認定弁などの印付けにPDFの文字データを
+// 併用しており、どちらの経路で読まれた結果か分かりにくく、片方を直してももう片方に
+// 反映されない原因になっていた。従来の併用動作に戻したい場合は true にする。
+const OCR_MODE_USES_PDF_TEXT = false;
+// 現在の読み取り方式に応じて、位置決め・品目判定に使ってよいPDF文字データを返す
+// （OCR ONで併用しない設定のときは、文字データが無いものとして扱う空の内容を返す）。
+function textForCurrentMode(textContent) {
+  return (isOcrEnabled() && !OCR_MODE_USES_PDF_TEXT) ? { items: [] } : textContent;
 }
 
 // ============================================================
@@ -1591,12 +1613,13 @@ dropZone.addEventListener('click', () => fileInput.click());
 // OneDrive/Box等のクラウド同期フォルダでは、同期状態によって個別ファイルの
 // 読み取り（entry.file()）が失敗することがあるため、エラー件数を数えて後段で通知する。
 let traverseErrorCount = 0;
+let lastTraverseError = null; // v107：失敗の原因（画面に表示して切り分けに使う）
 function traverseEntry(entry, out) {
   return new Promise(resolve => {
     if (entry.isFile) {
       entry.file(
         file => { out.push(file); resolve(); },
-        () => { traverseErrorCount++; resolve(); }
+        (err) => { traverseErrorCount++; lastTraverseError = err; resolve(); }
       );
     } else if (entry.isDirectory) {
       const reader = entry.createReader();
@@ -1605,13 +1628,35 @@ function traverseEntry(entry, out) {
           if (!entries.length) { resolve(); return; }
           for (const child of entries) { await traverseEntry(child, out); }
           readBatch(); // readEntries()は一度に全件返さない場合があるため繰り返し呼ぶ
-        }, () => { traverseErrorCount++; resolve(); });
+        }, (err) => { traverseErrorCount++; lastTraverseError = err; resolve(); });
       };
       readBatch();
     } else {
       resolve();
     }
   });
+}
+
+// v107：フォルダのドロップで、従来の走査方式（webkitGetAsEntry）が失敗する環境（同期フォルダ・
+// ネットワーク上のフォルダ・ブラウザの制限など）向けの代替。ドロップされた項目の「ハンドル」から
+// フォルダの中身をたどる（Chrome/Edgeで利用可能）。ドロップ処理の中で、最初のawaitより前に
+// getAsFileSystemHandle()を呼んでおく必要がある。
+async function collectFilesFromHandle(handle, out) {
+  try {
+    if (handle.kind === 'file') {
+      out.push(await handle.getFile());
+    } else if (handle.kind === 'directory') {
+      for await (const [, child] of handle.entries()) { await collectFilesFromHandle(child, out); }
+    }
+  } catch (err) {
+    traverseErrorCount++; lastTraverseError = err;
+  }
+}
+function describeTraverseError() {
+  if (!lastTraverseError) return '';
+  const n = lastTraverseError.name || 'Error';
+  const m = lastTraverseError.message || '';
+  return `（エラー内容：${n}${m ? ' / ' + m : ''}）`;
 }
 
 ['dragenter', 'dragover'].forEach(evt => {
@@ -1637,7 +1682,17 @@ dropZone.addEventListener('drop', async e => {
 
   let files = [];
   traverseErrorCount = 0;
+  lastTraverseError = null;
   const items = e.dataTransfer.items;
+  // 最初のawaitより前に、各項目のハンドルを確保しておく（awaitの後では取得できなくなるため）
+  const handlePromises = [];
+  try {
+    for (const it of Array.from(items || [])) {
+      if (it.kind === 'file' && typeof it.getAsFileSystemHandle === 'function') {
+        handlePromises.push(it.getAsFileSystemHandle().catch(() => null));
+      }
+    }
+  } catch (err) { /* ハンドル方式が使えない環境では従来方式のみ */ }
   const hasEntryApi = items && items.length && typeof items[0].webkitGetAsEntry === 'function';
   // 折りたたみ前に取得しておく（フォルダ以外の単純なファイルドロップ時のフォールバック用）
   const flatFiles = Array.from(e.dataTransfer.files);
@@ -1654,6 +1709,25 @@ dropZone.addEventListener('drop', async e => {
     }
     for (const entry of entries) { await traverseEntry(entry, files); }
 
+    // v107：走査に失敗した項目がある（または1件も取れなかった）場合は、ハンドル方式でやり直して、
+    // 取れたものを加える（同じファイルは名前・サイズ・更新日時で重複を除く）。
+    if (traverseErrorCount > 0 || !files.length) {
+      const firstErrCount = traverseErrorCount, firstErr = lastTraverseError;
+      traverseErrorCount = 0; lastTraverseError = null;
+      const viaHandle = [];
+      const handles = (await Promise.all(handlePromises)).filter(Boolean);
+      for (const h of handles) { await collectFilesFromHandle(h, viaHandle); }
+      if (viaHandle.length) {
+        const seen = new Set(files.map(fileKeyOf));
+        viaHandle.forEach(f => { const k = fileKeyOf(f); if (!seen.has(k)) { seen.add(k); files.push(f); } });
+        // 代替方式で取れたので、元の走査エラーは「回復した」ものとして扱う
+        if (traverseErrorCount === 0) lastTraverseError = null;
+      } else {
+        // 代替方式でも取れなかった：元のエラー内容を表示に残す
+        traverseErrorCount = Math.max(traverseErrorCount, firstErrCount);
+        if (!lastTraverseError) lastTraverseError = firstErr;
+      }
+    }
     // OneDrive/Box等の同期フォルダでは、フォルダ走査APIがファイルを1件も
     // 取得できずに終わることがある。その場合はフラットなファイル一覧
     // （e.dataTransfer.files）へフォールバックする。
@@ -1678,13 +1752,13 @@ dropZone.addEventListener('drop', async e => {
       dropFileName.textContent = `辞書ファイル ${jsonFiles.length}件を読み込みました。`;
     } else {
       dropFileName.textContent = traverseErrorCount > 0
-        ? `フォルダの読み取りに失敗した項目が${traverseErrorCount}件ありました（OneDrive/Box等の同期状態が原因の可能性があります）。お手数ですが「フォルダを選択」ボタンでの選択をお試しください。`
+        ? `フォルダの読み取りに失敗した項目が${traverseErrorCount}件ありました（OneDrive/Box等の同期状態・ネットワーク上のフォルダ・ブラウザの制限が原因の可能性があります）${describeTraverseError()}。お手数ですが「フォルダを選択」ボタンでの選択をお試しください（複数のフォルダは1つずつ追加できます）。`
         : 'フォルダ内、またはドロップした対象にPDFファイルが見つかりませんでした。';
     }
     return;
   }
   if (traverseErrorCount > 0) {
-    dropFileName.textContent = `読み込みに失敗した項目が${traverseErrorCount}件ありました（同期未完了のファイル等の可能性）。`;
+    dropFileName.textContent = `読み込みに失敗した項目が${traverseErrorCount}件ありました（同期未完了のファイル等の可能性）${describeTraverseError()}。取れたPDF ${files.length}件で続けます。`;
   }
   onFilesSelected(files);
 });
@@ -1703,24 +1777,29 @@ function sortPageDataByDrawingNo() {
   pageData.splice(0, pageData.length, ...indexed.map(x => x.e));
 }
 
+function fileKeyOf(f) { return `${f.name}|${f.size}|${f.lastModified}`; }
 function onFilesSelected(files) {
-  // v83で追加：ファイルは「受け取った順」にそのまま解析して表に積まれる。ドラッグ＆ドロップや
-  // フォルダ読み込みの受け取り順はOS・エクスプローラの状態に左右され、ファイル名順になるとは
-  // 限らない（例：-207が-204より先に出る）。解析前にファイル名の自然順（数字は数値として比較）で
-  // 並べ替え、図面番号順に出力されるようにする。
-  files = Array.from(files).sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja', { numeric: true }));
+  // v107：ファイルは「置き換え」ではなく「追加」にした。JOB No.などでフォルダが分かれている場合、
+  // ドラッグ＆ドロップやファイル選択を複数回に分けて行う必要があるが、従来は新しく選んだファイルだけが
+  // 残り、前に選んだファイルが消えていた（＝1回分しか読み取られない）。同じファイル（名前・サイズ・更新日時が
+  // 同じもの）は二重に入れない。取り消しは「選択をクリア」または一覧の✕で行う。
+  // v83：ファイルは解析前にファイル名の自然順（数字は数値として比較）で並べ替え、図面番号順に出力されるようにする。
+  const incoming = Array.from(files);
+  const have = new Set((selectedFiles || []).map(fileKeyOf));
+  let dupCount = 0;
+  const merged = (selectedFiles || []).slice();
+  incoming.forEach(f => { const k = fileKeyOf(f); if (have.has(k)) { dupCount++; } else { have.add(k); merged.push(f); } });
+  files = merged.sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja', { numeric: true }));
   selectedFiles = files;
   btnAnalyze.disabled = !files.length;
   btnAnalyzeAppend.disabled = !files.length || !pageData.length;
-  if (files.length === 1) {
-    dropFileName.textContent = `選択中: ${files[0].name}`;
-  } else if (files.length > 1 && files.length <= 8) {
-    dropFileName.textContent = `選択中: ${files.length}ファイル（${files.map(f => f.name).join(', ')}）`;
-  } else if (files.length > 8) {
-    dropFileName.textContent = `選択中: ${files.length}ファイル（PDF）`;
+  refreshClearSelectionButton();
+  if (files.length) {
+    dropFileName.textContent = `選択中: ${files.length}ファイル（ドロップ／選択するたびに追加されます）` + (dupCount ? ` ※重複${dupCount}件は除外` : '');
   } else {
     dropFileName.textContent = 'PDFファイルが見つかりませんでした。';
   }
+  renderSelectedFilesList();
   // v9で追加：デメリット対策①（処理時間）。ファイルを選んだ直後、ユーザーが「解析」を
   // 押すまでの間（数百ms〜数秒）を使って、裏でOCRエンジンの起動を先に済ませておく。
   // 実際の解析時にはすでに起動済みになっていることが多く、体感の待ち時間が短くなる。
@@ -1757,6 +1836,7 @@ async function runAnalysis(appendMode) {
   btnCopy.disabled = true;
   btnRecalc.disabled = true;
   copyStatus.textContent = '';
+  { const b = document.getElementById('btnClearSelection'); if (b) b.disabled = true; }
   progressBar.style.display = 'block';
   progressBar.value = 0;
   statusText.textContent = '読み込み中...';
@@ -1872,6 +1952,9 @@ async function runAnalysis(appendMode) {
     dropFileName.textContent = '';
     btnAnalyze.disabled = true;
     btnAnalyzeAppend.disabled = true;
+    refreshClearSelectionButton();
+    renderLoadedFilesBar();
+    renderSelectedFilesList();
     btnExcel.disabled = !pageData.length;
     btnCopy.disabled = !pageData.length;
     btnRecalc.disabled = !pageData.length;
@@ -1880,7 +1963,123 @@ async function runAnalysis(appendMode) {
   }
 }
 
-btnAnalyze.addEventListener('click', () => runAnalysis(false));
+// v107：誤って入れたファイル・図面を取り消すための機能。
+// ① 解析前：選択（ドラッグ＆ドロップ／クリック選択）をクリアする。
+// ② 解析後：読み込み済みファイルごとに結果を取り除く、または結果をすべてクリアする。
+function renderSelectedFilesList() {
+  const box = document.getElementById('selectedFilesList');
+  if (!box) return;
+  if (!selectedFiles || !selectedFiles.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  const chips = selectedFiles.map((f, i) =>
+    `<span style="display:inline-flex; align-items:center; gap:6px; margin:2px 6px 2px 0; padding:2px 8px; background:#fff; border:1px solid #C7D0D8; border-radius:14px;">
+      ${escapeHtml(f.name)}
+      <button type="button" class="btnRemoveSelected" data-i="${i}" title="この選択を取り消す" style="border:none; background:none; color:#B03A2E; cursor:pointer; font-size:14px; line-height:1; padding:0 2px;">✕</button>
+    </span>`).join('');
+  box.innerHTML = `<strong>選択中のファイル：</strong>${chips}`;
+  box.style.display = '';
+}
+document.getElementById('selectedFilesList').addEventListener('click', (ev) => {
+  const t = ev.target;
+  if (!(t instanceof Element)) return;
+  const btn = t.closest('.btnRemoveSelected');
+  if (!btn || isAnalysisRunning()) return;
+  const i = Number(btn.getAttribute('data-i'));
+  selectedFiles.splice(i, 1);
+  btnAnalyze.disabled = !selectedFiles.length;
+  btnAnalyzeAppend.disabled = !selectedFiles.length || !pageData.length;
+  dropFileName.textContent = selectedFiles.length ? `選択中: ${selectedFiles.length}ファイル` : '';
+  refreshClearSelectionButton();
+  renderSelectedFilesList();
+});
+function isAnalysisRunning() {
+  return btnCancelAnalyze && btnCancelAnalyze.style.display !== 'none';
+}
+function refreshClearSelectionButton() {
+  const b = document.getElementById('btnClearSelection');
+  if (b) b.disabled = !(selectedFiles && selectedFiles.length) || isAnalysisRunning();
+}
+document.getElementById('btnClearSelection').addEventListener('click', () => {
+  if (isAnalysisRunning()) return;
+  selectedFiles = [];
+  try { fileInput.value = ''; } catch (e) { /* 無視 */ }
+  try { folderInput.value = ''; } catch (e) { /* 無視 */ }
+  dropFileName.textContent = '';
+  btnAnalyze.disabled = true;
+  btnAnalyzeAppend.disabled = true;
+  refreshClearSelectionButton();
+  statusText.textContent = '選択を取り消しました。';
+  renderSelectedFilesList();
+});
+
+function renderLoadedFilesBar() {
+  const bar = document.getElementById('loadedFilesBar');
+  if (!bar) return;
+  if (!pageData.length) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+  const groups = new Map();
+  pageData.forEach(e => {
+    const idx = e.fileIndex || 0;
+    if (!groups.has(idx)) groups.set(idx, { idx, name: e.sourceFile || '(不明)', pages: 0 });
+    groups.get(idx).pages++;
+  });
+  const chips = Array.from(groups.values()).sort((a, b) => a.idx - b.idx).map(g =>
+    `<span style="display:inline-flex; align-items:center; gap:6px; margin:2px 6px 2px 0; padding:3px 8px; background:#fff; border:1px solid #C7D0D8; border-radius:14px;">
+      ${escapeHtml(g.name)}（${g.pages}ページ）
+      <button type="button" class="btnRemoveFile" data-file-index="${g.idx}" title="このファイルの結果を取り除く" style="border:none; background:none; color:#B03A2E; cursor:pointer; font-size:14px; line-height:1; padding:0 2px;">✕</button>
+    </span>`).join('');
+  bar.innerHTML = `<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+    <strong>読み込み済み：</strong>${chips}
+    <button type="button" class="ghost" id="btnClearAllResults" style="margin-left:auto; font-size:12px; padding:4px 10px;">結果をすべてクリア</button>
+  </div>`;
+  bar.style.display = '';
+}
+
+function afterResultsChanged() {
+  btnExcel.disabled = !pageData.length;
+  btnCopy.disabled = !pageData.length;
+  btnRecalc.disabled = !pageData.length;
+  btnAnalyzeAppend.disabled = !(selectedFiles && selectedFiles.length) || !pageData.length;
+  copyStatus.textContent = '';
+  renderPreview();
+  renderLoadedFilesBar();
+}
+
+document.getElementById('loadedFilesBar').addEventListener('click', (ev) => {
+  const t = ev.target;
+  if (!(t instanceof Element)) return;
+  if (isAnalysisRunning()) { alert('読み取り中は取り除けません。完了または中止してから操作してください。'); return; }
+  if (t.id === 'btnClearAllResults') {
+    if (!confirm('読み込み済みの結果をすべてクリアしますか？（手入力した修正も消えます）')) return;
+    pageData = [];
+    loadedFiles = [];
+    statusText.textContent = '結果をすべてクリアしました。';
+    afterResultsChanged();
+    return;
+  }
+  const btn = t.closest('.btnRemoveFile');
+  if (!btn) return;
+  const idx = Number(btn.getAttribute('data-file-index'));
+  const entries = pageData.filter(e => (e.fileIndex || 0) === idx);
+  if (!entries.length) return;
+  const name = entries[0].sourceFile || '';
+  if (!confirm(`「${name}」の結果（${entries.length}ページ分）を取り除きますか？（このファイルの手入力の修正も消えます）`)) return;
+  const kept = pageData.filter(e => (e.fileIndex || 0) !== idx);
+  kept.forEach(e => { if ((e.fileIndex || 0) > idx) e.fileIndex = (e.fileIndex || 0) - 1; });
+  pageData.splice(0, pageData.length, ...kept);
+  let li = (loadedFiles[idx] && loadedFiles[idx].name === name) ? idx : loadedFiles.findIndex(f => f.name === name);
+  if (li >= 0) loadedFiles.splice(li, 1);
+  statusText.textContent = `「${name}」の結果を取り除きました。`;
+  afterResultsChanged();
+});
+
+btnAnalyze.addEventListener('click', () => {
+  // v107：「新規」は以前の結果をすべて消して解析し直す。結果がある状態で押すと、前に読み取った分が
+  // 消えて「最後に入れた分しか集計されない」ように見えるため、消える前に確認する。
+  if (pageData.length) {
+    const ok = confirm(`いまの結果（${pageData.length}ページ分）を消して、選択中のファイルだけで新規に解析します。\n\n前の結果に追加したい場合は、「キャンセル」を押してから「解析して追加」を押してください。\n\n新規に解析しますか？`);
+    if (!ok) return;
+  }
+  runAnalysis(false);
+});
 btnAnalyzeAppend.addEventListener('click', () => runAnalysis(true));
 btnCancelAnalyze.addEventListener('click', () => {
   // 押した直後にすぐ反映されたことが分かるよう、ボタン自体もフィードバックを出す。
@@ -2591,7 +2790,7 @@ async function analyzePage(pdf, pageNum) {
       const titlePageCanvas = await renderPageForOcr(page);
       await withTimeout(ensureOcrEngine(), 60000, 'OCRエンジンの起動');
       const ocrResult = await ocrTitleBlockFallback(
-        page, titlePageCanvas, textContent, viewport, ph,
+        page, titlePageCanvas, textForCurrentMode(textContent), viewport, ph,
         { drawingNo: true, lineNo: true, lawCode: true }
       );
       if (ocrResult.drawingNo) {
@@ -2612,7 +2811,8 @@ async function analyzePage(pdf, pageNum) {
         // あった。OCR ON時にテキスト側へフォールバックする方針自体は変えず（OCR結果を
         // 常に最優先する）、OCRで何も検出できなかった場合に限り、保険としてテキスト層からの
         // 判定も試す。
-        const textLawCode = lawToCode(searchText);
+        // v106：OCR ONではPDFの文字データを使わない（併用したい場合はOCR_MODE_USES_PDF_TEXTをtrueにする）
+        const textLawCode = OCR_MODE_USES_PDF_TEXT ? lawToCode(searchText) : 'N';
         if (textLawCode !== 'N') { lawCode = textLawCode; }
       }
     } catch (e) {
@@ -2662,9 +2862,12 @@ async function analyzePage(pdf, pageNum) {
   // （OCRは一切動かない）。
   let materials = [];
   let unreadItems = [];
-  if (MATERIAL_SKIP_SERIES.includes(series)) {
-    // 親図など、材料表の無い図面：材料表の読み取り（テキスト・OCRとも）を行わない。
+  let materialsSkippedBySeries = false;
+  if (MATERIAL_SKIP_SERIES.includes(series) || !shouldReadMaterialsForSeries(series)) {
+    // 200番台以外の図面（「200番台以外の図面も集計する」がOFFのとき）：材料表の読み取り
+    // （テキスト・OCRとも）を行わない。
     materials = [];
+    materialsSkippedBySeries = true;
     console.info(`[材料表スキップ] page ${pageNum} / DRAWING No. ${drawingNo}（${series}のため材料表は読み取りません）`);
   } else if (isOcrEnabled()) {
     try {
@@ -2709,13 +2912,14 @@ async function analyzePage(pdf, pageNum) {
     materials = dropEmptyPlaceholderRows(materials, unreadItems);
   }
 
-  markCertifiedValves(materials, textContent, viewport); // v72：「（認定弁）」の印付け
-  markCertifiedProducts(materials, textContent, viewport); // v75：「OR（認定品）」等、弁以外の認定品の印付け
+  markCertifiedValves(materials, textForCurrentMode(textContent), viewport); // v72：「（認定弁）」の印付け
+  markCertifiedProducts(materials, textForCurrentMode(textContent), viewport); // v75：「OR（認定品）」等、弁以外の認定品の印付け
   materials = fixBossPlugRows(materials);   // v73：ボス／プラグ共有枠の行振り分け補正
-  markFlangeForm(materials, textContent, viewport); // v84：FLANGEの「(A形)」の印付け
+  markFlangeForm(materials, textForCurrentMode(textContent), viewport); // v84：FLANGEの「(A形)」の印付け
   materials = fixBfNoteText(materials);     // v84：BF加工品の注記が「BOSS」で途切れる不具合の補正
+  materials = fixLgNoteText(materials);     // v125：LGの材質欄に付属品注記の残骸（「、、、」等）が混入する不具合の補正
   materials = mergeBfNoteRows(materials);   // v73：BF加工品の注記行を前の行に統合
-  materials = dropLineNoLeakRows(materials); // v80：LINE No.の値が材料の行として混入したものを除去
+  materials = dropLineNoLeakRows(materials, lineNo); // v80：LINE No.の値が材料の行として混入したものを除去（v126：ページのLINE No.を渡して照合）
 
   // 図面番号が取れないページ（＝図書リスト・一覧表など図面ではないページ）では、
   // 一覧表の文字が材料表の行と誤認され、ITEMが「;<」のような意味のない文字列の行
@@ -2725,14 +2929,134 @@ async function analyzePage(pdf, pageNum) {
   //   かつ英数字・かな・漢字が3文字未満（＝品目名として成立していない）行だけを除外する。
   // 本物の図面で図面番号だけ読めなかった場合は、PIPE等の既知品目の行が残るため
   // 「(未検出)」として表示され、読み取り失敗に気づける（従来の警告機能は維持）。
+  // v108：図書管理表（Rev.0〜Rev.5の列がある一覧表）の「Rev.2 Rev.」等の文字や「13」等の工事No.が、
+  //   「(品目未検出)」の行として出力される不具合の対策。
+  //   ①「Rev.数字」を含む行は、材料表の行ではなく改訂欄・一覧表の文字なので全ページで除外する。
+  //   ②図面番号が取れないページでは、既知品目の行が2件未満なら材料表のあるページではないとみなして
+  //     全行を破棄する（従来は「(品目未検出)」の文字数が3以上のため、除外をすり抜けていた）。
+  // v114：品目名・材質欄の長音（ー）の横棒を統一する（例：「90°ショ－ト」→「90°ショート」）。
+  for (const m of materials) {
+    if (!m) continue;
+    if (m.item) m.item = unifyLongVowelMark(m.item);
+    if (m.description) m.description = unifyLongVowelMark(m.description);
+  }
+  // v116：縦書き「VALVE」の取りこぼし（E／ALE／VAL等）になった品目名はVALVEに直す。
+  for (const m of materials) {
+    if (!m || !m.item || m.item === 'VALVE') continue;
+    if (isValveFragmentText(m.item) && !MATERIAL_ROW_DEFS.some(d => { try { return d.test(String(m.item).trim()); } catch (e) { return false; } })) {
+      m.itemInheritedFromRaw = `${m.item}→VALVEの断片のためVALVEへ`;
+      m.item = 'VALVE'; m.itemInherited = true; m.itemMatched = true;
+    }
+  }
+  // v113→v119：品目名に注記（「（認定品）」「（認定弁）」「（8割ナット）」「（10割ナット）」）が混ざった行の補正。
+  //   ①「OR （認定品）」のように品目名と注記が一緒に読まれた行は、注記を除いて品目名だけにし、認定の印を付ける。
+  //   ②注記だけが品目名になった行（「(認定品)」「認定品」等）は、同じ品目欄セルの直前の行、無ければ直後の行の
+  //     品目名を借りる。どちらも無ければ「(品目未検出)」にして人が確認できるようにする（注記はITEM欄に入れない）。
+  {
+    // ① 品目名＋注記
+    for (const m of materials) {
+      if (!m || !m.item) continue;
+      const sp = splitItemNote(m.item);
+      if (!sp.has || !sp.base) continue;
+      m.itemInheritedFromRaw = `${m.item}→注記（${sp.kind || '括弧書き'}）を除去`;
+      m.item = sp.base;
+      applyItemNoteFlags(m, sp.kind);
+    }
+    // ② 注記だけ
+    const isNoteOnlyItem = it => { const sp = splitItemNote(it); return sp.has && !sp.base; };
+    const sameCell = (a, b) => !(a.itemCellKey != null && b.itemCellKey != null && a.itemCellKey !== b.itemCellKey);
+    for (let i = 0; i < materials.length; i++) {
+      const m = materials[i];
+      if (!m || !isNoteOnlyItem(m.item)) continue;
+      const sp = splitItemNote(m.item);
+      let donor = null;
+      for (let j = i - 1; j >= 0; j--) {
+        const d = materials[j];
+        if (!d || isNoteOnlyItem(d.item) || d.item === '(品目未検出)') continue;
+        if (!sameCell(m, d)) break;
+        donor = d; break;
+      }
+      if (!donor && m.itemCellKey != null) {
+        for (let j = i + 1; j < materials.length; j++) {
+          const d = materials[j];
+          if (!d || isNoteOnlyItem(d.item) || d.item === '(品目未検出)') continue;
+          if (d.itemCellKey !== m.itemCellKey) break;
+          donor = d; break;
+        }
+      }
+      if (donor) {
+        m.itemInheritedFromRaw = `${m.item}→${donor === materials[i - 1] || materials.indexOf(donor) < i ? '直前' : '直後'}の行の品目へ（注記のため）`;
+        m.item = donor.item;
+        m.itemInherited = true;
+        m.itemMatched = donor.itemMatched;
+        if (sp.kind === '認定品' && donor.item !== 'VALVE') {
+          m.nintei = true; m.ninteiKind = '認定品';
+          donor.nintei = true; donor.ninteiKind = '認定品';
+        } else if (sp.kind === '認定' || sp.kind === '認定品') { m.nintei = true; donor.nintei = true; }
+      } else {
+        // 借りられる行が無い：注記をITEM欄に残さず「(品目未検出)」にする（認定の印は残す＝材質欄に付記される）。
+        m.itemInheritedFromRaw = `${m.item}→注記だけで品目名が読めなかったため品目未検出`;
+        m.item = '(品目未検出)';
+        m.itemMatched = false;
+        applyItemNoteFlags(m, sp.kind);
+      }
+    }
+  }
+  // v109：どの読み取り経路を通っても、品目が「(品目未検出)」のまま残った行は、最終段階で材質欄の内容から
+  //   品目を補正する（PIPE：STPG370…PE 等）。補正した行は紫の破線（要確認）で表示される。
+  if (typeof inferItemFromContentForInherited === 'function') {
+    for (const m of materials) {
+      if (!m || !(m.item === '(品目未検出)' || isFragmentItemName(m.item))) continue;
+      if (m.cellOverrides && Object.prototype.hasOwnProperty.call(m.cellOverrides, 'K')) continue;
+      let fix = '';
+      try { fix = inferItemFromContentForInherited(m); } catch (e) { fix = ''; }
+      if (fix && fix !== '(品目未検出)') {
+        m.itemInheritedFromRaw = `${m.itemInheritedFromRaw || m.itemRawOcrText || ''}→内容から補正(品目未検出→${fix})`;
+        m.itemSource = `${m.itemSource || ''}→内容から補正`;
+        m.itemInherited = true;
+        m.item = fix;
+        m.itemMatched = true;
+      }
+    }
+  }
+  // v122：「（認定品）」は品目ラベル（OR等）に付く注記なので、その品目の行すべてに効く。OCRは行ごとに読むため、
+  //   注記を読めた行にだけ印が付き、同じ品目の他の行（OR 50A・OR 20A等）には付かないことがある。
+  //   同じ品目欄セルの中（セルが検出できない場合は連続した同じ品目の行）で、1行でも「認定品」の印があれば、
+  //   同じ品目の他の行にも印を付ける（出力時に材質欄へ「（認定品）」が付記される）。弁（VALVE）は対象外。
+  {
+    let groupStart = 0;
+    const sameGroup = (a, b) => a && b && a.item === b.item && (a.itemCellKey == null || b.itemCellKey == null || a.itemCellKey === b.itemCellKey);
+    for (let i = 1; i <= materials.length; i++) {
+      if (i < materials.length && sameGroup(materials[i - 1], materials[i])) continue;
+      const grp = materials.slice(groupStart, i).filter(Boolean);
+      groupStart = i;
+      if (!grp.length || grp[0].item === 'VALVE' || grp[0].item === '(品目未検出)') continue;
+      if (grp.some(m => m.nintei && m.ninteiKind === '認定品')) {
+        for (const m of grp) { m.nintei = true; m.ninteiKind = '認定品'; }
+      }
+    }
+  }
+  const REV_NOISE = /\bRev\.?\s*\d/i;
+  if (materials.length) {
+    const before = materials.length;
+    materials = materials.filter(m => !(REV_NOISE.test(String(m.item || '')) ||
+      REV_NOISE.test(String(m.size || '')) || REV_NOISE.test(String(m.description || ''))));
+    if (materials.length !== before) console.info(`[Rev.欄の行を除外] page ${pageNum}：${before - materials.length}行（図書管理表・改訂欄の文字）`);
+  }
   if (!drawingNo && materials.length) {
     const knownKeys = new Set(MATERIAL_ROW_DEFS.map(d => d.key));
     const MEANINGFUL_CHAR = /[A-Za-z0-9\u3040-\u30FF\u4E00-\u9FFF]/g;
-    materials = materials.filter(m => {
-      if (knownKeys.has(m.item)) return true;
-      const cnt = (String(m.item || '').match(MEANINGFUL_CHAR) || []).length;
-      return cnt >= 3;
-    });
+    const knownCount = materials.filter(m => knownKeys.has(m.item)).length;
+    if (knownCount < 2) {
+      console.info(`[図書リスト扱い] page ${pageNum}：図面番号なし・既知品目${knownCount}行のため材料行を全て破棄`);
+      materials = [];
+    } else {
+      materials = materials.filter(m => {
+        if (knownKeys.has(m.item)) return true;
+        const cnt = (String(m.item || '').match(MEANINGFUL_CHAR) || []).length;
+        return cnt >= 3;
+      });
+    }
   }
 
   // v88：親図は、既知品目の行が2件以上ある場合のみ材料表ありとして採用、それ以外は破棄。
@@ -2773,7 +3097,7 @@ async function analyzePage(pdf, pageNum) {
   return {
     pageIndex: pageNum - 1, drawingNo, lawCode, issueDate, series,
     jobNo, projectName, lineNo, tag, filename, status, cls, materials,
-    ocrIssues, hasOcrHardFailure, unreadItems
+    ocrIssues, hasOcrHardFailure, unreadItems, materialsSkippedBySeries
   };
 }
 
@@ -2810,6 +3134,38 @@ function fixBfNoteText(materials) {
       if (idx < 0) return;
       const base = d.slice(0, idx).trim();
       m.description = base ? base + ' ' + CAN : CAN;
+    });
+  } catch (e) { /* 補正に失敗しても元のまま続行 */ }
+  return materials;
+}
+
+// v125で追加：LG（認定品）の材質欄の補正。
+// 図面のLG行は「LG-HE-10Fcc (支給品)」の下に、2行にわたる付属品の注記
+// 「＊付属品：15A ボール弁(VBS-11C)、相フランジ、ボルト、ナット、ガスケット、プラグ(R1/2)」が付く。
+// OCRは小さな日本語を読めず、日本語を除去する処理（sanitizeOcrDescription）で注記が
+// 「LG-HE-10Fcc(＊:15A(VBS-11C)、、、(R1/2」のように崩れて材質欄に混入していた。
+// 型式（LG-xxx-xxx）を先頭から取り出し、注記は読み取れた英数字（サイズ・弁の型式・プラグのねじサイズ）
+// から定型の文面で復元する。復元に必要な情報（サイズ・弁の型式）が読めなければ、型式だけを残す
+// （壊れた注記は出力しない）。
+function fixLgNoteText(materials) {
+  try {
+    (materials || []).forEach(m => {
+      if (!m || String(m.item || '').trim().toUpperCase() !== 'LG') return;
+      const d = String(m.description || '').normalize('NFKC').replace(/\s*-\s*/g, '-').replace(/\s+/g, ' ').trim();
+      const mb = d.match(/LG-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*/);
+      if (!mb) return;                       // 型式が読めない場合は触らない
+      const base = mb[0];
+      const rest = d.slice(mb.index + base.length);
+      if (!rest.replace(/[\s()（）、,，。.＊*:：]/g, '')) { m.description = base; return; }
+      const size = rest.match(/(\d{1,3})\s*A\b/);
+      const valve = rest.match(/\(\s*([A-Z]{2,5}-?\d+[A-Z]?)\s*\)/);
+      const plug = rest.match(/R\s*(\d+)\s*\/\s*(\d+)/);
+      if (size && valve) {
+        const plugTxt = plug ? `プラグ(R${plug[1]}/${plug[2]})` : 'プラグ';
+        m.description = `${base} ＊付属品：${size[1]}A ボール弁(${valve[1]})、相フランジ、ボルト、ナット、ガスケット、${plugTxt}`;
+      } else {
+        m.description = base;
+      }
     });
   } catch (e) { /* 補正に失敗しても元のまま続行 */ }
   return materials;
@@ -2852,14 +3208,25 @@ function markFlangeForm(materials, textContent, viewport) {
 // v80で追加：材料表の下にあるLINE No.の値（例：「80A-GAS(EVAC)-7012-6/2」）が、最後の品目
 // （インレット弁等）の行として出力される不具合の最終防波堤（テキスト抽出・OCRどちらの経路でも有効）。
 // サイズ・数量が空で、材質欄がLINE No.の書式（「80A-流体名-…」）だけの行は、材料ではないので除く。
-function dropLineNoLeakRows(materials) {
+function dropLineNoLeakRows(materials, pageLineNo) {
   // v82：「φ6-CuTUBE」のように、サイズが「φ数字」の（○A-で始まらない）LINE No.の値も対象にする。
   const LINE_NO_LIKE = /^\s*(?:\d{1,4}\s*A\s*-\s*[^\s-]+\s*-\s*\S+|[φΦØø]\s*\d+\s*[- ]\s*[A-Za-z]\S*)/i;
+  // v126：材料表の最後の品目（VALVE等）の枠がLINE No.の欄まで伸びている図面では、LINE No.の値が
+  //   その品目の行として拾われ、しかもSIZE欄に「40A」のような値が入ることがある（SIZEが空という
+  //   従来の条件をすり抜けていた）。そこで次のどちらかに当てはまる行も、材料ではないので除く：
+  //   ①材質欄がそのページのLINE No.と同じ（空白・ハイフンの表記ゆれは無視）。
+  //   ②数量が空で、材質欄がLINE No.の書式。（本物の材料の行には必ず数量がある）
+  const norm = t => String(t || '').normalize('NFKC').replace(/[\s\u3000]/g, '').replace(/[‐‑‒–—―−ーｰ－]/g, '-').toUpperCase();
+  const ln = norm(pageLineNo);
   return (materials || []).filter(m => {
     const noSize = !String(m.size || '').trim();
     const noQty = !String(m.qty || '').trim();
     const desc = String(m.description || '').normalize('NFKC');
-    return !(noSize && noQty && LINE_NO_LIKE.test(desc));
+    if (noSize && noQty && LINE_NO_LIKE.test(desc)) return false;
+    if (noQty && LINE_NO_LIKE.test(desc)) return false;
+    const d = norm(desc);
+    if (noQty && ln.length >= 5 && d.length >= 5 && (d === ln || d.includes(ln) || ln.includes(d))) return false;
+    return true;
   });
 }
 function mergeBfNoteRows(materials) {
@@ -3127,14 +3494,31 @@ function extractPipeAndGasketClass(lineNo) {
 // ※図面番号が読めなかったページ（図書リスト）と、番号が600番台以上・形式不明のページは、
 //   アイソメ図の番号読み取り失敗の可能性もあるため、対象外にせず従来どおり読み取る。
 // v88：親図(100番台)でも材料表付きの図面があるため、番号だけでのスキップをやめた。
+// v107：既定は200番台のみ集計に戻した。200番台以外は、画面のチェックボックスをONにしたときだけ
+//       集計する（判定は shouldReadMaterialsForSeries）。ONのときは下記v88の判定が働く。
 // 代わりに読み取り後、既知品目(PIPE/ELBOW/FLANGE等)の行が2件以上ある場合だけ「材料表あり」と
 // 判定し、無ければ結果を破棄する（親図で別の表が材料行と誤認される問題の対策）。
 const MATERIAL_SKIP_SERIES = [];
 
+// v107：材料表を集計する図面の種別の判定。
+// 　チェックOFF（既定）＝ 200番台のアイソメ図（図面番号の末尾が200〜599）だけ集計する。
+// 　チェックON ＝ 200番台以外（親図・600番台以降・形式不明）も、材料表があれば集計する。
+// ※図面番号が読めなかったページ（種別「図書リスト」）は、アイソメ図の番号の読み取り失敗の
+//   可能性があるため、チェックOFFでも従来どおり読み取る（読めた行は「図面番号(未検出)」で
+//   表示されるので、読み取り失敗に気づける）。
+function shouldReadMaterialsForSeries(series) {
+  const cb = document.getElementById('includeNon200');
+  if (cb && cb.checked) return true;
+  return series === 'アイソメ' || series === '図書リスト';
+}
+
 function getDrawingSeries(drawingNo) {
   if (!drawingNo) return '図書リスト';
   // v87：枝番付き（例：…-55-216-1）は枝番を除いた番号（216）でシリーズを判定する。
-  const m = drawingNo.match(/-(\d{3,5})(?:-\d{1,3})?$/);
+  // v112：枝番は1〜2桁（-1、-12）に限る。以前は3桁まで許していたため、「L-D-T26001-129-201」の
+  //   末尾「-201」を枝番と取り違え、工事No.の「129」を図面の番号とみなして親図（100番台）と
+  //   判定していた（200番台のアイソメ図なのに材料表が集計されなかった）。
+  const m = drawingNo.match(/-(\d{3,5})(?:-\d{1,2})?$/);
   if (!m) return '不明';
   const num = parseInt(m[1], 10);
   if (num >= 100 && num <= 199) return '親図';
@@ -3590,6 +3974,35 @@ async function ocrTitleBlockFallback(page, pageCanvas, textContent, viewport, ph
     } catch (e) {
       logOcrIssue('適用法規欄OCR認識（ページ全体走査）', e);
     }
+    // v110：ページ全体を1回で読む方式は、画像が大きく縮小されるうえ、KEY PLAN（細かい文字の地図）等が
+    //   あると、法規枠の小さな文字（例：「高圧ガス保安法」）を読み落として空欄になることがあった。
+    //   全体走査で何も検出できなかった場合に限り、法規枠がある位置（表の左隣・ページ下寄り）だけを
+    //   拡大して読み直す。見出し（適用法規）が無く、法規名だけが書かれた枠にも対応する。
+    //   読み直しで得られるのは法規のキーワード（消防/大臣認定/高圧ガス/低圧ガス/NONE）だけなので、
+    //   誤検出の恐れは小さい。
+    if (!result.lawCode) {
+      try {
+        const boundLeftRatio2 = (activeProfileForScan && activeProfileForScan.columns)
+          ? activeProfileForScan.columns.boundLeft
+          : FIXED_MATERIAL_COLUMN_RATIOS.boundLeft;
+        const regions = [
+          { x0: pw * 0.55, x1: pw * boundLeftRatio2, y0: ph * 0.68, y1: ph * 0.88 },
+          { x0: pw * 0.40, x1: pw * boundLeftRatio2, y0: ph * 0.60, y1: ph * 0.92 }
+        ];
+        for (const rg of regions) {
+          const crop2 = cropForOcr(pageCanvas, rg);
+          const raw2 = fixAutocadSymbolsForOcr(await withTimeout(recognizeCrop(crop2), 60000, 'OCR認識（適用法規・枠の読み直し）'));
+          const code2 = lawToCode(raw2);
+          if (code2 !== 'N') {
+            result.lawCode = code2;
+            console.info('[適用法規] ページ全体走査で検出できず、枠の読み直しで検出:', code2, raw2);
+            break;
+          }
+        }
+      } catch (e) {
+        logOcrIssue('適用法規欄OCR認識（枠の読み直し）', e);
+      }
+    }
   }
 
   return result;
@@ -3600,9 +4013,34 @@ async function ocrTitleBlockFallback(page, pageCanvas, textContent, viewport, ph
 // のマトリクス様式。品目ラベルのY座標を基準に行の帯を作り、そこに落ちる注釈をX座標で
 // 列判定して紐付ける。テンプレートの多少のズレに耐えられるよう、見出し(ITEM/SIZE/
 // DESCRIPTION/QTY)の実際の位置から列境界を都度計算する。
+// v107：品目ラベルの表記ゆれ対策。全角英数（ＰＩＰＥ）・互換文字などを半角に揃え、前後の空白と
+// 幅ゼロの文字を除いてから判定する。以前は完全一致のみで、見た目が同じでも文字コードが違う
+// だけでラベルが検出できず、その品目の行が隣の品目に吸収される原因になっていた。
+function normalizeLabelText(str) {
+  return String(str == null ? '' : str).normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+}
+
+// v127：「90° ショート」「45° ショート」（ショートエルボ）のラベル判定。
+//   角度（90°/45°）に加えて「ショート」らしい文字が続くものだけを対象にする
+//   （「MO 90°」のように縦書き「ELBOW」の文字が混ざっただけのラベルは対象外）。
+function isShortElbowLabel(text, angle) {
+  const t = String(text == null ? '' : text).normalize('NFKC').replace(/[\s\u3000]/g, '');
+  const m = t.match(/(90|45)[°゜˚º]?(.*)$/);
+  if (!m || +m[1] !== angle) return false;
+  const rest = m[2];
+  if (!rest) return false;
+  return /ショ|シヨ|ｼｮ|ｼﾖ|SHORT|ショ[ー－ｰ\-一‐―]?[トﾄ卜]|[ー－ｰ\-一‐―][トﾄ卜]/i.test(rest);
+}
+
 const MATERIAL_ROW_DEFS = [
   { key: 'PIPE',         test: s => s === 'PIPE' },
   { key: '90°ELBOW',     test: s => s === '90°' },
+  // v127：「90° ショート」（ショートエルボ）を独立した品目として登録する。
+  //   従来は未登録のため、OCRの品目判定（fuzzyMatchMaterialDef）が「90°」を含む文字列を一律に
+  //   90°ELBOWとして扱い、ショートエルボの行が90°ELBOWとして集計されていた。
+  //   表記ゆれ（「90°ショ－ト」「90° ｼｮｰﾄ」「90°ショートエルボ」、長音の横棒の種類、OCRの読み違い）を許容する。
+  { key: '90°ショート',   test: s => isShortElbowLabel(s, 90) },
+  { key: '45°ショート',   test: s => isShortElbowLabel(s, 45) },
   { key: '45°ELBOW',     test: s => s === '45°' },
   { key: 'TEE',          test: s => s === 'TEE' },
   { key: 'CON.REDUCER',  test: s => s === 'CON.' },
@@ -3634,8 +4072,12 @@ const MATERIAL_ROW_DEFS = [
   { key: 'ハーフユニオン',  test: s => s === 'ハーフユニオン' },
   // v73で変更：日本語ラベル「プラグ」も PLUG として扱う。
   { key: 'PLUG',         test: s => s === 'PLUG' || String(s).replace(/\s/g, '') === 'プラグ' },
-  { key: 'NIPPLE',       test: s => s === '六角ニップル' || s === 'ニップル' },
-  { key: 'PRESSURE GAUGE', test: s => s === '圧力計' },
+  // v124：「片ニップル」を品目として登録（旧：未登録のため、OCRの読み取り文字がそのままITEM欄に出ていた）。
+  //   OCRは「ップ」を「ッフ」「ツプ」「ッブ」と読み違えやすいため、その揺れを許容する。
+  //   品目ラベルに重なる改訂の菱形（◇）と中の数字が一緒に読まれても、末尾の記号・数字は無視する。
+  { key: '片ニップル',     test: s => /^片\s*ニ[ッツ][プフブ][ルレ][\s\d◇◆◊]*$/.test(String(s).normalize('NFKC').replace(/\s+/g, ' ').trim()) },
+  { key: 'NIPPLE',       test: s => s === '六角ニップル' || s === 'ニップル' || /^(六角)?\s*ニ[ッツ][プフブ][ルレ]$/.test(String(s).normalize('NFKC').replace(/\s+/g, ' ').trim()) },
+  { key: '圧力計', test: s => s === '圧力計' }, // v121：ITEM欄の表記は図面どおり「圧力計」（旧：PRESSURE GAUGE）
   { key: 'BLIND FLANGE', test: s => s === 'BLIND FLANGE' || s === 'ブラインドフランジ' || /^BLIND\s*FLANGE$/i.test(s) || /ブラインド/.test(s) },
 ];
 
@@ -3789,7 +4231,7 @@ function extractMaterials(annots, textContent, viewport, pageCanvas) {
   const _anchorTableTopY = Math.min(...Object.values(headerCandidates).map(h => h.y));
   const _anchorBandLeft = bounds.boundLeft - Math.max(80, (bounds.boundSizeDesc - bounds.boundLeft) * 2.5);
   for (const it of textContent.items) {
-    const s = (it.str || '').trim();
+    const s = normalizeLabelText(it.str);
     for (const def of MATERIAL_ROW_DEFS) {
       if (def.test(s)) {
         const [vx, vy] = viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
@@ -3897,7 +4339,11 @@ function extractMaterials(annots, textContent, viewport, pageCanvas) {
     if (vx >= bounds.boundLeft || (vx + (it.width || 0) / 2) < itemLabelBandLeft) continue; // 品目ラベル列の帯から外れたものは対象外
     if (vy < tableTopY) continue; // 見出し行より上（表の外）は対象外
     if (vy >= tableBottomY - TABLE_BOTTOM_MARGIN) continue; // LINE No./CLIENT欄以降（表の外）は対象外
-    anchors.push({ key: s, y: vy, x: vx, label: s, isDynamic: true });
+    // v119：「OR （認定品）」のように注記が一緒に印字されたラベルは、注記を除いた品目名をキーにする。
+    const spLbl = splitItemNote(s);
+    if (spLbl.has && !spLbl.base) continue;
+    const lblText = spLbl.has ? spLbl.base : s;
+    anchors.push({ key: lblText, y: vy, x: vx, label: lblText, isDynamic: true });
   }
   anchors = mergeWrappedDynamicLabels(anchors); // v87：折り返しラベルの連結
 
@@ -3982,7 +4428,7 @@ function extractMaterials(annots, textContent, viewport, pageCanvas) {
       if (cellLines && cellLines.length >= 3) {
         const labelYs = bands.map(b => b.y1 - 4);
         bands.forEach((b, i) => {
-          if (b.key === '90°ELBOW' || b.key === '45°ELBOW') return;
+          if (b.key === '90°ELBOW' || b.key === '45°ELBOW' || b.key === '90°ショート' || b.key === '45°ショート') return;
           const cell = itemCellRangeOf(labelYs[i], cellLines);
           if (!cell) return;
           const inCell = labelYs.filter(y => y >= cell.top && y < cell.bottom).length;
@@ -4078,7 +4524,16 @@ function extractMaterials(annots, textContent, viewport, pageCanvas) {
     ? Math.max(3, Math.min(avgH * 0.6, medianRowGap * 0.5))
     : Math.max(3, avgH * 0.6);
 
-  return rowsFromCells(cells, bands, bounds, rowYTolerance);
+  const _rows = rowsFromCells(cells, bands, bounds, rowYTolerance);
+  // v107：材料表の先頭は必ずPIPEの行。PIPEの見出しが検出できないと、表の先頭から最初に見つかった
+  // 品目の見出しまでが丸ごとその品目（例：90°ELBOW）の行として扱われる。この状態を検出し、
+  // 該当行に目印を付ける（値は書き換えない）。
+  if (Array.isArray(_rows) && bands.length && !bands.some(b => b.key === 'PIPE')) {
+    const firstKey = bands[0].key;
+    for (const r of _rows) { if (r && r.item === firstKey) r.itemBandSuspect = true; }
+    console.warn('[v107] PIPEの見出しを検出できませんでした。先頭の品目（' + firstKey + '）の行を要確認にしました。');
+  }
+  return _rows;
 }
 
 // ============================================================
@@ -4129,19 +4584,10 @@ const OCR_REGION_PROFILE_MAX_COUNT = 5;
 // 保存後に読み戻して確認し、失敗時は原因を表示、メモリ上（このタブを閉じるまで）に保持し、
 // JSONファイルとして書き出せるようにする。
 // v92：図面から実測した読み取り範囲の組み込みプリセット（読み取り専用。保存データには書き込まない）。
-// G25094-101（RAIZNEXT様式）の罫線位置を実測：品目欄左端0.742／SIZE左端0.8006／QTY左端0.9335／表右端0.9565、
-// 見出し下端0.060／表下端0.77。標準の固定比率(0.8199/0.9679/0.9870)とは表の位置が異なる。
-const BUILTIN_OCR_PROFILES = {
-  '【実測】RAIZNEXT様式(G25094)': {
-    itemLeftRatio: 0.742,
-    columns: { boundLeft: 0.8006, boundSizeDesc: 0.86, boundDescQty: 0.9335, boundQtyEnd: 0.9565 },
-    headerBottomRatio: 0.060,
-    tableBottomRatio: 0.77,
-    lineNoBox: { x0: 0.80, x1: 0.95, y0: 0.70, y1: 0.76 },   // この様式にLINE No.欄は無いため、空欄部分を指定
-    drawingNoBox: { x0: 0.80, x1: 0.96, y0: 0.945, y1: 0.99 },
-    lawCodeBox: { x0: 0, x1: 0.8006, y0: 0, y1: 1 }
-  }
-};
+// v107：組み込みプリセットを全て削除した（客先プロファイルは、読み取り範囲の設定画面で
+//       各自が作成・保存したものだけを使う）。組み込みを再び追加する場合は、下の {} に
+//       '【実測】名前': { ...設定値... } の形で書く。
+const BUILTIN_OCR_PROFILES = {};
 const BUILTIN_PROFILE_PREFIX = '【実測】';
 let _ocrProfilesMemory = null;   // 読み込み済みプロファイル（メモリ）
 let _ocrActiveNameMemory = null; // 選択中プロファイル名（メモリ）
@@ -4415,7 +4861,7 @@ function buildRowBands(anchors, firstRowTopY) {
   // 「90° ショート」はラベルが完全一致しない未知ラベル扱いのため、隣り合う2つのエルボ系ラベルの
   // どちらかが「ショート」の場合に限り、ラベル間隔の1/4だけ次のラベルより手前を境界にする
   // （2行ごとのまとまりなら、次のまとまりの1行目の半行分手前＝前のまとまりの2行目の直後）。
-  const isElbowLike = r => r.key === '90°ELBOW' || r.key === '45°ELBOW' ||
+  const isElbowLike = r => r.key === '90°ELBOW' || r.key === '45°ELBOW' || r.key === '90°ショート' || r.key === '45°ショート' ||
     /^(90|45)[°゜˚º]/.test(String(r.label || '').normalize('NFKC').replace(/\s/g, ''));
   const isShortLabel = r => /ショート|ｼｮｰﾄ|SHORT/i.test(String(r.label || '').normalize('NFKC').replace(/\s/g, ''));
   for (let i = 0; i < resultBands.length - 1; i++) {
@@ -4493,7 +4939,7 @@ const FLANGE_DESC_PATTERN = /^JIS\d+K.*SUSF\d+/i; // 例: JIS10K SOP.FF SUSF304
 // 代わりに「フランジと無関係な品目（レデューサー・エルボ・TEE・PIPE）の帯にはみ出した行」に限って
 // FLANGEへ補正する。
 const FLANGE_DESC_PATTERN_EXT = /^JIS\d+K.*?(?:SOP|SOH|SO|WN|FF|RF).*?(?:SUSF\d+|SS\d{3}|SFVC\d*|SF\d{3}|S25C|SUS\d{3})/i;
-const FLANGE_MISASSIGNABLE_ITEMS = new Set(['CON.REDUCER', 'ECC.REDUCER', 'TEE', '90°ELBOW', '45°ELBOW', 'PIPE']);
+const FLANGE_MISASSIGNABLE_ITEMS = new Set(['CON.REDUCER', 'ECC.REDUCER', 'TEE', '90°ELBOW', '45°ELBOW', '90°ショート', '45°ショート', 'PIPE']);
 // 鋼管（PIPE）の規格表記（例：SUS304TP-A 3.0t／SGP／STPG370）。継手の接続表記（BW・SW・SCR'D）は含まない。
 const PIPE_TUBE_DESC_PATTERN = /(?:^|[^A-Za-z])(?:TP(?:[-\s]?[AB])?|SGP|STPG\d*|STPT\d*|STPY\d*|STS\d*)(?![A-Za-z])/i;
 const FITTING_CONNECTION_PATTERN = /(?:^|[^A-Za-z])(?:BW|SW|SCR'?D?)(?![A-Za-z])/i;
@@ -4710,7 +5156,7 @@ function buildMaterialRowFromCluster(cluster, bounds, band) {
   // 空白なしで連結すると「2」と「1」が「21」のような別の数値に化けてしまうため、
   // 空白区切りで連結する（正しく1行に分かれていれば通常は1つの値のみが入る）。
   // v10で追加：全角数字（３個等）が混じっていても半角に統一してから扱う。
-  const qty = normalizeWidthAndSpaces(qtyParts.map(p => p[1]).join(' '));
+  const qty = stripQtyMarks(normalizeWidthAndSpaces(qtyParts.map(p => p[1]).join(' '))); // v123：数量の「※」は無視
   if (!size && !rawDescription && !qty) return null; // 空行（未使用の品目）は除外
 
   // AutoCAD由来の図面では、記号（φ・°・±等）がテキストとして正しく変換されず
@@ -4814,7 +5260,26 @@ function extractSupplyReuseTag(desc, qty) {
 // （見た目には表示されるがテキストデータとしては存在しない）、DESCRIPTION欄が空欄のまま
 // になってしまう。この状態はテキスト抽出だけでは原理的に救えないため、該当行だけを
 // ページ画像として切り出し、OCR（画像認識）で文字を読み取って補完する。
-const OCR_SCALE = 4; // 小さな文字も認識できるよう高めの解像度でレンダリングする
+// v129：OCR_SCALE（pt→画素の倍率）は、ページごとに renderPageForOcr() が決めて入れ直す（以前は固定値4）。
+//   A1（1684×2384pt）のような大判ページを固定の4倍で描くと、約6700×9500px（約6400万画素・約250MB）の
+//   画像が1ページで複数枚（タイトル欄用・罫線用・本体用・雲マーク除去用）作られてメモリを使い果たし、
+//   OCRエンジン(WebAssembly)が壊れる（「table index is out of bounds」）か、ブラウザが固まっていた。
+//   A3以下は従来どおり4倍。それより大きいページだけ、画像の画素数がA3の4倍描画と同程度（約1700万画素）に
+//   収まるよう倍率を下げる（A1なら約2倍。A1は文字もA3の約2倍の大きさで描かれるため、読み取りに必要な
+//   画素数はほぼ同じ）。
+const OCR_SCALE_DEFAULT = 4;          // 小さな文字も認識できるよう高めの解像度でレンダリングする
+const OCR_MAX_PAGE_PIXELS = 17000000; // 1ページ分の画像の画素数の上限
+let OCR_SCALE = OCR_SCALE_DEFAULT;
+function decideOcrScaleForPage(page) {
+  try {
+    const v1 = page.getViewport({ scale: 1 });
+    const area = v1.width * v1.height;
+    if (!(area > 0)) return OCR_SCALE_DEFAULT;
+    const maxScale = Math.sqrt(OCR_MAX_PAGE_PIXELS / area);
+    // 小数にすると座標計算が煩雑になるため、0.25刻みで切り捨てる（最低1倍）
+    return Math.max(1, Math.min(OCR_SCALE_DEFAULT, Math.floor(maxScale * 4) / 4));
+  } catch (e) { return OCR_SCALE_DEFAULT; }
+}
 const OCR_PADDING_PT = 3; // 列境界ぎりぎりで文字が切れないよう、上下左右に少し余白を持たせる
 
 // v3で変更：Tesseract.jsのワーカー起動処理を、PaddleOCRベースの高精度エンジン
@@ -4832,10 +5297,35 @@ function embeddedAssetDataUri(assetKey, mimeType) {
   if (!b64) throw new Error(`埋め込みアセットが見つかりません: ${assetKey}`);
   return `data:${mimeType};base64,${b64}`;
 }
+// v120：OCRエンジン（PaddleOCR）は中国語（簡体字）も認識対象に含むため、日本語の「圧力計」を
+//   「压力計」、「既設使用」を「既设使用」、「支給品」を「支给品」、「認定品」を「认定品」のように、
+//   簡体字で読むことがある。そのままでは品目名（圧力計等）・支給/転用/既設の判定・認定品の判定が
+//   日本語の字形との完全一致に失敗する。この図面で使う語に出てくる、日本語との対応が一意な字だけを
+//   OCR結果の段階で日本語の字形に直す（全部の簡体字は対象にしない：「制」「点」等は日本語でも使うため）。
+const OCR_SIMPLIFIED_TO_JP = { '压': '圧', '计': '計', '设': '設', '阀': '弁', '转': '転', '给': '給', '减': '減', '认': '認' };
+function fixSimplifiedForJapanese(text) {
+  const t = String(text == null ? '' : text);
+  return t.replace(/[压计设阀转给减认]/g, ch => OCR_SIMPLIFIED_TO_JP[ch] || ch);
+}
+function patchOcrSimplifiedToJapanese() {
+  try {
+    const eng = window.PPOCR;
+    if (!eng || eng.__jpPatched || typeof eng.recognize !== 'function') return;
+    const orig = eng.recognize;
+    eng.recognize = async function (...args) {
+      const lines = await orig.apply(this, args);
+      if (Array.isArray(lines)) {
+        for (const l of lines) { if (l && typeof l.text === 'string') l.text = fixSimplifiedForJapanese(l.text); }
+      }
+      return lines;
+    };
+    eng.__jpPatched = true;
+  } catch (e) { console.warn('OCR結果の簡体字補正の設定に失敗（無視して続行）', e); }
+}
 let ocrInitPromise = null;
 function ensureOcrEngine() {
   if (!ocrInitPromise) {
-    ocrInitPromise = window.PPOCR.init({
+    ocrInitPromise = Promise.resolve(window.PPOCR.init({
       detectionPath: embeddedAssetDataUri('det', 'application/octet-stream'),
       recognitionPath: embeddedAssetDataUri('rec', 'application/octet-stream'),
       dictionaryPath: embeddedAssetDataUri('dict', 'text/plain'),
@@ -4843,9 +5333,53 @@ function ensureOcrEngine() {
         'ort-wasm.wasm': embeddedAssetDataUri('wasm', 'application/wasm'),
         'ort-wasm-simd.wasm': embeddedAssetDataUri('wasmsimd', 'application/wasm'),
       },
-    });
+    })).then(r => { patchOcrSimplifiedToJapanese(); return r; });
   }
   return ocrInitPromise;
+}
+
+// v128：OCRエンジン呼び出しの安全化（「table index is out of bounds」対策）。
+// 【背景】OCRエンジン（ONNX Runtime＝WebAssembly）は、1回の認識が終わる前に次の認識を始めると
+//   内部状態が壊れ、以降のすべての認識が「table index is out of bounds」等で失敗する
+//   （1度壊れると、以降のページのDRAWING No.・LINE No.・適用法規・QTYなど全部のOCRが連鎖して失敗する）。
+//   withTimeout()でアプリ側が待ちを打ち切っても、エンジン内の処理は止まらず続くため、
+//   その後の呼び出しと重なると同じ状態になる。
+// ①すべての認識を1本の順番待ち（キュー）に通し、必ず前の認識が終わってから次を始める。
+// ②WebAssembly由来の致命的エラーが出たら、エンジンを初期化し直して同じ画像を1回だけ再試行する。
+// ③それでも復旧しなければ、OCRを停止して「ページの再読み込みが必要」と分かるメッセージを出す
+//   （延々と同じエラーを出し続けない）。
+let ocrCallChain = Promise.resolve();
+let ocrRecoverCount = 0;
+let ocrDead = false;
+const OCR_FATAL_PATTERN = /table index is out of bounds|memory access out of bounds|unreachable|null function|indirect call|Aborted|out of memory|WebAssembly|RuntimeError/i;
+const OCR_DEAD_MESSAGE = 'OCRエンジンが異常終了したため、OCRを停止しました。ページを再読み込み（F5）してから、続きのページを処理してください（一度に読み込むPDFのページ数を減らすと起きにくくなります）。';
+function ocrRecognizeSafe(dataUrl) {
+  const run = async () => {
+    if (!dataUrl || String(dataUrl).length < 120) return []; // 空・極小の画像はエンジンに渡さない
+    if (ocrDead) throw new Error(OCR_DEAD_MESSAGE);
+    try {
+      return await window.PPOCR.recognize(dataUrl);
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      if (!OCR_FATAL_PATTERN.test(msg)) throw e;
+      console.warn('OCRエンジンで致命的エラー。初期化し直して再試行します:', msg);
+      if (ocrRecoverCount >= 2) { ocrDead = true; throw new Error(`${OCR_DEAD_MESSAGE}（原因: ${msg}）`); }
+      ocrRecoverCount++;
+      try {
+        ocrInitPromise = null;
+        await ensureOcrEngine();
+        const r = await window.PPOCR.recognize(dataUrl);
+        ocrRecoverCount = 0; // 復旧できた
+        return r;
+      } catch (e2) {
+        ocrDead = true;
+        throw new Error(`${OCR_DEAD_MESSAGE}（原因: ${msg}）`);
+      }
+    }
+  };
+  const p = ocrCallChain.then(run, run);
+  ocrCallChain = p.catch(() => {});
+  return p;
 }
 
 // 切り出したセル画像（canvas）をOCRエンジンに渡し、検出された行のテキストを
@@ -4854,7 +5388,7 @@ function ensureOcrEngine() {
 // ある行だけを自動検出してくれるため、余分な空白行の影響を受けにくい。
 async function recognizeCrop(crop) {
   const dataUrl = crop.toDataURL('image/png');
-  const lines = await window.PPOCR.recognize(dataUrl);
+  const lines = await ocrRecognizeSafe(dataUrl);
   return lines.map(l => l.text).join(' ').trim();
 }
 
@@ -4865,7 +5399,7 @@ async function recognizeCrop(crop) {
 // 複数行にまたがった場合は文字数で重み付けした平均を信頼度とする。
 async function recognizeCropWithConfidence(crop) {
   const dataUrl = crop.toDataURL('image/png');
-  const lines = await window.PPOCR.recognize(dataUrl);
+  const lines = await ocrRecognizeSafe(dataUrl);
   const text = lines.map(l => l.text).join(' ').trim();
   let weightedSum = 0, weightTotal = 0;
   lines.forEach(l => {
@@ -4894,7 +5428,7 @@ const OCR_LOW_CONFIDENCE_THRESHOLD = 0.8;
 // いちばん上を採用」しているのと同じ考え方で、OCR版もこれに揃える。
 async function recognizeCropTopLine(crop) {
   const dataUrl = crop.toDataURL('image/png');
-  const lines = await window.PPOCR.recognize(dataUrl);
+  const lines = await ocrRecognizeSafe(dataUrl);
   if (!lines.length) return '';
   const topOf = l => (l.box && l.box.length >= 2) ? Math.min(l.box[1], l.box[3]) : 0;
   const sorted = lines.slice().sort((a, b) => topOf(a) - topOf(b));
@@ -4908,7 +5442,7 @@ async function recognizeCropTopLine(crop) {
 // ＝「LINE No.として正しい行のうち、いちばん上の段」を選べるようにする。
 async function recognizeCropLinesTopDown(crop) {
   const dataUrl = crop.toDataURL('image/png');
-  const lines = await window.PPOCR.recognize(dataUrl);
+  const lines = await ocrRecognizeSafe(dataUrl);
   return mergeOcrFragmentsOnSameRow(lines);
 }
 
@@ -4951,7 +5485,7 @@ function mergeOcrFragmentsOnSameRow(lines) {
 // ピクセル座標）も一緒に返す。QTY列のどのY座標に数字があるかを特定するために使う。
 async function recognizeCropDetailed(crop) {
   const dataUrl = crop.toDataURL('image/png');
-  const lines = await window.PPOCR.recognize(dataUrl);
+  const lines = await ocrRecognizeSafe(dataUrl);
   return lines.map(l => {
     const pts = l.box || [];
     const ys = pts.map(p => p[1]);
@@ -4975,7 +5509,7 @@ async function recognizeCropDetailed(crop) {
 // 注：検出座標(box)は「縦横を32の倍数に拡大した画像」上の座標なので、元の画像の高さに換算してから判定する。
 async function recognizeCropWithinBand(crop) {
   const dataUrl = crop.toDataURL('image/png');
-  const lines = await window.PPOCR.recognize(dataUrl);
+  const lines = await ocrRecognizeSafe(dataUrl);
   const BASE = 32;
   const resizedH = Math.max(BASE, Math.ceil(crop.height / BASE) * BASE);
   const toOrig = crop.height / resizedH;
@@ -4992,13 +5526,79 @@ async function recognizeCropWithinBand(crop) {
 // ページ全体をOCR用の高い解像度でオフスクリーンcanvasに一度だけレンダリングする。
 // （行ごとに毎回ページ全体を描画し直すと非常に遅くなるため、ページ内で使い回す。）
 async function renderPageForOcr(page) {
+  OCR_SCALE = decideOcrScaleForPage(page); // v129：ページの大きさに応じて倍率を決める
   const viewport = page.getViewport({ scale: OCR_SCALE });
   const canvas = document.createElement('canvas');
   canvas.width = Math.ceil(viewport.width);
   canvas.height = Math.ceil(viewport.height);
   const ctx = canvas.getContext('2d');
   await page.render({ canvasContext: ctx, viewport }).promise;
+  // v116：改訂の雲マークが材料表の罫線・数字に重なっている図面の対策（下記の関数を参照）。
+  try { await removeRevisionCloudLayerFromTable(page, viewport, canvas); } catch (e) { /* 失敗しても元の画像のままOCRを続ける */ }
   return canvas;
+}
+
+// v116：CAD出力のPDFでは、改訂の雲マークがレイヤー（任意コンテンツ）に分かれて描かれていることがある
+//   （例：L-D-T26001-116-201 では雲マークがレイヤー「0」）。雲の円弧が材料表の罫線に重なると、隣の行の
+//   数字の下端・上端に触れて、数量が空欄／誤読（「2」が空欄、「1」「3」が「13」）になる。
+//   雲の疑いがあるレイヤー（名前が「0」、または雲／cloud／rev／改訂／変更／訂正を含む）を非表示にして
+//   もう一度描き、材料表の領域だけを、その画像で置き換える。
+//   ただし、そのレイヤーに表の罫線や文字が含まれる図面で内容が欠けないよう、置き換える前に次を確認する。
+//     ・表領域の横罫線の本数が変わらないこと
+//     ・黒画素が減ること（雲があること）、ただし減り方が小さいこと（元の88%〜99.5%が残ること）
+//   どれかに当てはまらなければ何もしない（従来どおりの画像のまま）。表領域の外は常に元の画像のまま。
+async function removeRevisionCloudLayerFromTable(page, viewport, canvas) {
+  const transport = page && page._transport;
+  if (!transport || typeof transport.getOptionalContentConfig !== 'function') return false;
+  const cfg = await transport.getOptionalContentConfig();
+  if (!cfg || typeof cfg.setVisibility !== 'function') return false;
+  let entries = [];
+  try { if (typeof cfg[Symbol.iterator] === 'function') entries = [...cfg]; } catch (e) { entries = []; }
+  if (!entries.length && typeof cfg.getGroups === 'function') {
+    const g = cfg.getGroups();
+    if (g) entries = (g instanceof Map) ? [...g] : Object.entries(g);
+  }
+  const NAME_PAT = /^0$|雲|cloud|rev|改訂|変更|訂正/i;
+  const ids = entries.filter(([id, grp]) => grp && NAME_PAT.test(String(grp.name || '').trim())).map(([id]) => id);
+  if (!ids.length) return false;
+  for (const id of ids) cfg.setVisibility(id, false);
+  const canvas2 = document.createElement('canvas');
+  canvas2.width = canvas.width; canvas2.height = canvas.height;
+  let rendered = false;
+  try {
+    await page.render({ canvasContext: canvas2.getContext('2d'), viewport, optionalContentConfigPromise: Promise.resolve(cfg) }).promise;
+    rendered = true;
+  } finally {
+    for (const id of ids) { try { cfg.setVisibility(id, true); } catch (e) { /* 無視 */ } }
+  }
+  if (!rendered) return false;
+  // 材料表の領域（右側の表。LINE No.欄より上）だけを比較・置き換える
+  const rx = Math.floor(canvas.width * 0.78), ry = Math.floor(canvas.height * 0.03);
+  const rw = canvas.width - rx, rh = Math.floor(canvas.height * 0.75) - ry;
+  if (rw < 50 || rh < 50) return false;
+  const stat = cv => {
+    const d = cv.getContext('2d').getImageData(rx, ry, rw, rh).data;
+    let dark = 0, lines = 0, prevLine = false;
+    for (let y = 0; y < rh; y++) {
+      let c = 0;
+      for (let x = 0; x < rw; x++) {
+        const i = (y * rw + x) * 4;
+        if ((0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) < 160) c++;
+      }
+      dark += c;
+      const isLine = c >= rw * 0.85;
+      if (isLine && !prevLine) lines++;
+      prevLine = isLine;
+    }
+    return { dark, lines };
+  };
+  const a = stat(canvas), b = stat(canvas2);
+  if (!a.dark) return false;
+  const ratio = b.dark / a.dark;
+  if (a.lines !== b.lines || ratio < 0.88 || ratio > 0.995) return false;
+  canvas.getContext('2d').drawImage(canvas2, rx, ry, rw, rh, rx, ry, rw, rh);
+  console.info(`[雲マーク除去] 雲の疑いがあるレイヤー(${ids.length}件)を除いた画像で材料表領域を置き換えました（黒画素 ${(ratio * 100).toFixed(1)}% が残存、横罫線 ${a.lines}本）`);
+  return true;
 }
 
 
@@ -5227,8 +5827,30 @@ function cropQtyForOcr(sourceCanvas, bbox) {
     if (refH < 8) return crop; // 小さすぎる画像では判定が不安定なので何もしない
     const keep = new Set();
     const dotCandidates = [];
+    // v123：数量の前に付く「※」は数量ではないので、OCRに渡す前に画像から消す（数字や小数点と混ざって
+    //   「83.4」「×.3.4」のように読まれるのを防ぐ）。「※」は、X形の塊1つと、その上下左右にある小さな点
+    //   （3つ以上）でできている。一番左の背の高い塊で、周りに点が3つ以上付いているものだけを対象にし、
+    //   右側にまだ別の塊（数字）がある場合に限る。数字や小数点（点は1つだけ）は対象外。
+    const refMark = new Set();
+    {
+      const tallBlobs = comps.filter(c => hOf(c) >= refH * 0.55 && hOf(c) < h * 0.9 && wOf(c) < w * 0.9 && !touchesTB(c))
+        .sort((a, b) => a.minX - b.minX);
+      const first = tallBlobs[0];
+      if (first && tallBlobs.length >= 2) {
+        const nearDots = comps.filter(c => c !== first && hOf(c) <= refH * 0.35 && wOf(c) <= refH * 0.4 &&
+          c.maxX >= first.minX - refH * 0.5 && c.minX <= first.maxX + refH * 0.5 &&
+          c.maxY >= first.minY - refH * 0.5 && c.minY <= first.maxY + refH * 0.5 &&
+          // 右側の数字より、この塊のほうに近い点だけ
+          c.minX < tallBlobs[1].minX);
+        if (nearDots.length >= 3 && wOf(first) <= refH * 1.2) {
+          refMark.add(first.id);
+          for (const c of nearDots) refMark.add(c.id);
+        }
+      }
+    }
     for (const c of comps) {
       const ch = hOf(c);
+      if (refMark.has(c.id)) continue;                            // v123：「※」は残さない
       if (ch >= h * 0.9 || wOf(c) >= w * 0.9) continue;          // 罫線
       if (touchesTB(c) && ch < refH * 0.55) continue;            // 隣の行の記号の切れ端
       if (ch >= refH * 0.55) { keep.add(c.id); continue; }       // 数字
@@ -5252,8 +5874,9 @@ function cropQtyForOcr(sourceCanvas, bbox) {
     // いたが、単位記号の無い行（VALVE・BOSS・PLUG・LGの「1」など）では、貼り直した
     // 「1」だけの画像をOCRが読み落とし／誤読する（例：1→50）副作用が出た。前処理は
     // 「8」のように単位記号が付いて読めなくなっていた行にだけ適用する。
-    let removedSmall = false;
+    let removedSmall = refMark.size > 0; // v123：「※」を消した場合は加工後の画像を使う
     for (const c of comps) {
+      if (removedSmall) break;
       if (keep.has(c.id)) continue;
       if (hOf(c) >= h * 0.9 || wOf(c) >= w * 0.9) continue; // 罫線は数えない
       if (hOf(c) >= 5) { removedSmall = true; break; }
@@ -5513,8 +6136,18 @@ const fixAutocadSymbolsForOcr = s => String(s || '')
 // QTY欄ははみ出しがあっても必ず一番右（＝生テキストの最後）に本来の値が来るため、
 // 最初の数値ではなく最後に見つかった数値を採用するよう変更する。
 const QTY_NUMERIC_PATTERN = /\d+(?:\.\d+)?/g;
+// v123：数量欄の「※」（注記の参照印。銅管など）は数量の一部ではないので無視する。
+//   ・「※」「＊」「*」は取り除く。
+//   ・OCRが「※」を「×」「x」「X」「米」と読んで数字の直前に付けた場合も取り除く（数量に「×」等は付かない）。
+function stripQtyMarks(q) {
+  if (q == null) return q;
+  return String(q).normalize('NFKC')
+    .replace(/[※*＊]/g, ' ')
+    .replace(/(^|\s)[×xX米]+\s*(?=\d)/g, '$1')
+    .replace(/\s+/g, ' ').trim();
+}
 function cleanOcrQty(rawText) {
-  const matches = normalizeWidthAndSpaces(rawText).match(QTY_NUMERIC_PATTERN);
+  const matches = stripQtyMarks(normalizeWidthAndSpaces(rawText)).match(QTY_NUMERIC_PATTERN);
   const v = matches && matches.length ? matches[matches.length - 1] : '';
   return /^0\d*$/.test(v) ? '' : v; // v68：「0」「00」等の不自然な値は採用しない
 }
@@ -5607,6 +6240,16 @@ function dropEmptyPlaceholderRows(rows, droppedOut) {
 // 品目名はMATERIAL_ROW_DEFSとのゆるい照合のみ行い、一致しなければ「(品目未確定)」
 // として、SIZE/DESCRIPTION/QTYの中身だけでも出力に残す（品目名は人が見て直せる）。
 // v102：品目欄セル全体のOCR結果から、採用できる品目ラベル文字列を返す（無ければ''）。
+// v116：縦書きの「VALVE」ラベルは、OCRで「E」「ALE」「VAL」のように一部の文字しか読めないことがある。
+//   英字だけ（5文字以内）で、VALVEの文字を順番どおりに拾った断片（部分列）ならVALVEとみなす。
+function isValveFragmentText(text) {
+  // v118：OCRが断片の前後に混ぜる記号（| : ; , ' ( ) [ ] 等）も無視して判定する。
+  const u = String(text || '').normalize('NFKC').toUpperCase().replace(/[\s.\-_|:;,'"`()\[\]{}<>\/\\]/g, '');
+  if (!u || u.length > 5 || !/^[A-Z]+$/.test(u)) return false;
+  let j = 0;
+  for (const ch of 'VALVE') { if (j < u.length && ch === u[j]) j++; }
+  return j === u.length;
+}
 function itemLabelFromCellOcrText(cellText) {
   const t = String(cellText || '').trim();
   if (!t) return '';
@@ -5617,7 +6260,9 @@ function itemLabelFromCellOcrText(cellText) {
     const u = tok.toUpperCase();
     for (const def of MATERIAL_ROW_DEFS) { if (def.test(u)) { found.set(def.key, u); break; } }
   }
-  return found.size === 1 ? [...found.values()][0] : '';
+  if (found.size === 1) return [...found.values()][0];
+  if (isValveFragmentText(t)) return 'VALVE'; // v116
+  return '';
 }
 function fuzzyMatchMaterialDef(text) {
   const t = String(text || '').trim();
@@ -5633,6 +6278,9 @@ function fuzzyMatchMaterialDef(text) {
   // v56で追加：縦書き「ELBOW」の文字（回転して「MO」等に読まれる）が「MO 90°」のように
   // 90°/45°の前に混入するケースの救済。文字列中に 90° / 45° があればエルボとして扱う
   // （「90° ロング」「90° ショート」等、後ろに付く文字も許容）。
+  // v127：「90° ショート」は90°ELBOWではなく、ショートエルボ（'90°ショート'）として扱う。
+  if (isShortElbowLabel(t, 90)) return MATERIAL_ROW_DEFS.find(d => d.key === '90°ショート');
+  if (isShortElbowLabel(t, 45)) return MATERIAL_ROW_DEFS.find(d => d.key === '45°ショート');
   if (/90\s*[°゜˚]/.test(t)) return MATERIAL_ROW_DEFS.find(d => d.key === '90°ELBOW');
   if (/45\s*[°゜˚]/.test(t)) return MATERIAL_ROW_DEFS.find(d => d.key === '45°ELBOW');
   const noLead = t.replace(/^[A-Za-z]\s+(?=[A-Za-z]{2,}\.?$)/, '');
@@ -5673,7 +6321,7 @@ function fuzzyMatchMaterialDef(text) {
 function collectTextBasedItemBands(textContent, viewport, bounds, tableTopY, tableHeaderBottomY, itemLabelBandLeft) {
   let anchors = [];
   for (const it of textContent.items) {
-    const s = (it.str || '').trim();
+    const s = normalizeLabelText(it.str);
     for (const def of MATERIAL_ROW_DEFS) {
       if (def.test(s)) {
         const [vx, vy] = viewport.convertToViewportPoint(it.transform[4], it.transform[5]);
@@ -5712,7 +6360,11 @@ function collectTextBasedItemBands(textContent, viewport, bounds, tableTopY, tab
     // その行の品目が「RSE」になっていた。
     if (vx >= bounds.boundLeft || (vx + (it.width || 0) / 2) < itemLabelBandLeft) continue; // 品目ラベル列の帯から外れたものは対象外
     if (vy < tableTopY) continue; // 見出し行より上（表の外）は対象外
-    anchors.push({ key: s, y: vy, x: vx, label: s, isDynamic: true });
+    // v119：「OR （認定品）」のように注記が一緒に印字されたラベルは、注記を除いた品目名をキーにする。
+    const spLbl = splitItemNote(s);
+    if (spLbl.has && !spLbl.base) continue;
+    const lblText = spLbl.has ? spLbl.base : s;
+    anchors.push({ key: lblText, y: vy, x: vx, label: lblText, isDynamic: true });
   }
   anchors = mergeWrappedDynamicLabels(anchors); // v87：折り返しラベルの連結
 
@@ -6010,6 +6662,7 @@ function constrainBandToCell(y, cellLines, textItemBands, currentBand) {
 }
 
 async function scanQtyColumnForMissingRows(page, textContent, viewport) {
+  textContent = textForCurrentMode(textContent); // v106：OCR ONではPDFの文字データを位置決め・品目名に使わない（見出し位置・表の下端・品目ラベルは画像と読み取り範囲の設定から決める）
   const headerCandidates = {};
   for (const it of textContent.items) {
     const s = (it.str || '').trim();
@@ -6143,7 +6796,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
         const qtyText = normalizeWidthAndSpaces(await recognizeQtyCell(pageCanvas, { x0: bounds.boundDescQty, x1: bounds.boundQtyEnd, y0: band.y0, y1: band.y1 }));
         const nums = qtyText.match(QTY_NUMERIC_PATTERN);
         if (nums && nums.length) qty = nums[nums.length - 1];
-      } catch (e) { /* この行の数量が読めなくても他の項目は出力を試みる */ }
+      } catch (e) { logOcrIssue('数量(QTY欄)の読み取りに失敗した行があります', e); /* この行の数量が読めなくても他の項目は出力を試みる */ }
       rowBands.push({ bandY0: band.y0, bandY1: band.y1, qty, qtyY: (band.y0 + band.y1) / 2 });
     }
   } else {
@@ -6280,6 +6933,22 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
             if (cellText && hasMeaningfulChars(cellText)) {
               const cellItemLabel = itemLabelFromCellOcrText(cellText);
               if (cellItemLabel) itemText = cellItemLabel;
+              // v113：「流量計 （認定品）」のように、辞書に無い品目名に括弧書きの注記（認定品・8割ナット等）が
+              //   付いたセルは、上の判定では採用されず、行ごとの読み取りに回って、行ごとに「流量計」
+              //   「(認定品)」「認定品」と別々の品目名になっていた。括弧書きを除いた残りを品目名とし、
+              //   注記が「認定品」なら、その印（出力時に材質欄へ「（認定品）」を付記）も付ける。
+              else {
+                const ntx = String(cellText).normalize('NFKC');
+                const notes = ntx.match(/[（(][^）)]*[）)]/g) || [];
+                if (notes.some(x => /認定|割ナット/.test(x))) {
+                  const baseLabel = stripHeaderLeak(ntx.replace(/[（(][^）)]*[）)]/g, ' ').replace(/\s+/g, ' ').trim());
+                  const baseCnt = (baseLabel.match(/[A-Za-z0-9\u3040-\u30FF\u4E00-\u9FFF]/g) || []).length;
+                  if (baseLabel && baseCnt >= 2 && baseLabel.length <= 20) {
+                    itemText = baseLabel;
+                    if (notes.some(x => /認定品/.test(x))) { ninteiFlag = true; ninteiKind = '認定品'; }
+                  }
+                }
+              }
             }
           }
         }
@@ -6289,7 +6958,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
           const itemCrop = cropForOcr(pageCanvas, { x0: itemLabelBandLeft, x1: bounds.boundLeft, y0: bandY0, y1: bandY1 });
           itemText = stripHeaderLeak(normalizeWidthAndSpaces(await recognizeCrop(itemCrop)));
         }
-      } catch (e) { /* 品目名が読めなくても他の項目は出力を試みる */ }
+      } catch (e) { logOcrIssue('品目名(ITEM欄)の読み取りに失敗した行があります', e); /* 品目名が読めなくても他の項目は出力を試みる */ }
       // v52で追加：罫線ベースの行区切り（v48）は1行分ぴったりの帯でITEM欄を切り出すため、
       // 品目ラベルが2行にまたがるセルの真ん中あたりに印字されている場合（例：FLANGEの
       // 50A行・15A行のちょうど中間にラベルがある等）、どちらの1行分の帯にもラベルの
@@ -6332,7 +7001,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
       const split = splitSizeAndDescriptionOcr(rawSizeDesc);
       sizeText = cleanOcrSize(split.size);
       descText = split.description;
-    } catch (e) { /* noop */ }
+    } catch (e) { logOcrIssue('SIZE/DESCRIPTION欄の読み取りに失敗した行があります', e); }
 
     // v41で追加：テキスト帯で品目が確定している場合はそれを最優先で使う（辞書に無い
     // 未知品目名がテキストとして印字されているケースも、そのままの表記を品目名として
@@ -6424,7 +7093,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
     // ①「※3.4」のように印の付いた数量が説明欄の末尾に入ってしまい数量が空になった場合は、数量へ移す。
     // ②数量が「1 1」のように数字が複数並んだ場合は、最後の1つ（本来の値）だけにする。
     let descFinal = String(descClean || descText || '');
-    let qtyFinal = String(band.qty || '').trim();
+    let qtyFinal = stripQtyMarks(String(band.qty || '').trim()); // v123：数量の「※」は無視
     {
       const mq = descFinal.normalize('NFKC').match(/(?:^|\s)[※*＊]\s*(\d+(?:\.\d+)?)\s*[A-Za-z]?\s*$/);
       if (mq) {
@@ -6552,7 +7221,7 @@ async function scanQtyColumnForMissingRows(page, textContent, viewport) {
     // v103：品目名がどうしても読めず「(品目未検出)」のまま残った行も、材質欄の内容から明らかに
     //   判別できる場合（例：TP-A…BE→PIPE、JIS10K LF→FLANGE、V#…→GASKET）は補正する。
     //   補正した行は紫の破線（要確認）で表示されるので、人が確認できる。
-    const undetected = row.item === '(品目未検出)';
+    const undetected = row.item === '(品目未検出)' || isFragmentItemName(row.item);
     if (!((row.itemInherited && row.itemCellKey == null) || guessy || undetected)) return;
     const fix = inferItemFromContentForInherited(row);
     if (fix && fix !== row.item) {
@@ -6642,6 +7311,60 @@ function splitSizeAndDescriptionOcrCore(text) {
   return { size: '', description: s };
 }
 
+// v114：カタカナの長音（ー）が、OCRや文字コードの違いで別の横棒（－全角ハイフン・-半角ハイフン・
+//   ‐‑–—―−・漢字の「一」・長音記号）になる表記ゆれ（例：「ショ－ト」「ショ-ト」「ショ一ト」）を統一する。
+// v115：統一先の幅は、前後のカタカナに合わせる。前・後ろ・前後のどちらかが半角カタカナなら半角の「ｰ」
+//   （U+FF70）、どちらも全角なら全角の「ー」（U+30FC）にする。文字全体を全角に変換することはしない
+//   （カタカナ本体や英数字には一切触れず、横棒1文字だけを置き換える）。
+//   対象は、カタカナの直後にあり、次がカタカナ（または語末・空白・括弧）の横棒だけ。
+function unifyLongVowelMark(str) {
+  if (str == null) return str;
+  const isHalfKana = ch => !!ch && /[\uFF66-\uFF9F]/.test(ch);
+  return String(str).replace(
+    /([\u30A1-\u30FA\u30FC\uFF66-\uFF9F])[\-\u2010-\u2015\u2212\uFF0D\uFF70\u4E00\u2500\u30FC](?=([\u30A1-\u30FA\uFF66-\uFF9F])|$|[\s（()）])/g,
+    (m, prev, next) => prev + ((isHalfKana(prev) || isHalfKana(next)) ? '\uFF70' : '\u30FC')
+  );
+}
+
+// v111：品目名がOCRで「E」「A」のような1〜2文字の断片（縦書きラベルの取りこぼし）になった行か。
+//   既知の品目名ではなく、英数字・かな漢字が2文字以下のものだけを対象にする。
+function isFragmentItemName(item) {
+  const t = String(item || '').trim();
+  if (!t || t === '(品目未検出)') return false;
+  if (MATERIAL_ROW_DEFS.some(d => { try { return d.test(t); } catch (e) { return false; } })) return false;
+  return (t.match(/[A-Za-z0-9\u3040-\u30FF\u4E00-\u9FFF]/g) || []).length <= 2;
+}
+
+// v119：品目名（ITEM欄）に混ざる「（認定品）」「（認定弁）」「（8割ナット）」「（10割ナット）」等の注記を分離する。
+//   OCRは「OR （認定品）」「(認定品)」「認定品」「（10割ナット」のように、注記を品目名と一緒に、あるいは
+//   注記だけを品目名として読むことがある。注記は品目名ではないため、ITEM欄には入れない。
+//   戻り値：{ has: 注記があったか, base: 注記を除いた品目名, kind: '認定品'|'認定'|'割ナット'|'' }
+const ITEM_NOTE_TOKEN_RE = /[（(]?\s*(?:認定品|認定弁|[0-9]+\s*割\s*ナット|認定)\s*[）)]?/g;
+function splitItemNote(item) {
+  const raw = String(item == null ? '' : item);
+  const t = raw.normalize('NFKC');
+  const notes = t.match(ITEM_NOTE_TOKEN_RE) || [];
+  if (!notes.length) return { has: false, base: raw.trim(), kind: '' };
+  let base = t.replace(ITEM_NOTE_TOKEN_RE, ' ').replace(/\s+/g, ' ').trim();
+  base = base.replace(/^[\s\-–—・:：|｜]+|[\s\-–—・:：|｜]+$/g, '');
+  // 「ブロックオリフィス OR」「OR ブロックオリフィス」は、本ツールの品目名「OR」に統一する。
+  if (/^(?:ブロックオリフィス\s*)?OR(?:\s*ブロックオリフィス)?$/i.test(base)) base = 'OR';
+  const kind = notes.some(n => /認定品/.test(n)) ? '認定品'
+    : notes.some(n => /認定/.test(n)) ? '認定'
+    : notes.some(n => /割/.test(n)) ? '割ナット' : '';
+  return { has: true, base, kind };
+}
+// 注記の種類に応じて、認定の印（出力時に材質欄へ「（認定品）」「（認定弁）」を付記する元）を付ける。
+function applyItemNoteFlags(m, kind) {
+  if (!m) return;
+  if (kind === '認定品') {
+    if (m.item !== 'VALVE') { m.nintei = true; m.ninteiKind = '認定品'; }
+    else m.nintei = true;
+  } else if (kind === '認定') {
+    m.nintei = true;
+  }
+}
+
 // v91：借用された品目名が内容と明らかに矛盾する場合の補正先を返す（補正不要なら ''、不明なら '(品目未検出)'）。
 function inferItemFromContentForInherited(row) {
   const cur = row.item;
@@ -6652,8 +7375,14 @@ function inferItemFromContentForInherited(row) {
   if (/V\s*#|GASKET|ガスケット/.test(U)) guess = 'GASKET';
   else if (/BOLT|ボルト|ﾎﾞﾙﾄ|ナット|ﾅｯﾄ|\bM\d{1,2}\s*[X×]\s*\d+/.test(U)) guess = 'BOLT&NUT';
   else if (/SCS14A|ボール弁|バルブ|VALVE/.test(U)) guess = 'VALVE';
+  // v111：弁の型式（VSM-17・VBS-11S・VUI-14 等：V＋英字1〜3文字＋番号）からもVALVEと判定する。
+  //   縦書きの「VALVE」ラベルは最後の「E」だけが読めることがあり、型式でしか判別できない。
+  else if (/(^|[^A-Z])V[A-Z]{1,3}-?\d{1,3}[A-Z]?(?![A-Z0-9])/.test(U)) guess = 'VALVE';
   else if (/JIS\s*\d+K\s*(RF|FF|LF|SOP|SOH|WN|SW|BL)\b/.test(U) || /\bFLANGE\b|フランジ/.test(U)) guess = 'FLANGE';
-  else if (/(^|[^A-Z])(TP|STPG|SGP)(-|\b)/.test(U) || /\bBE\b/.test(U)) guess = 'PIPE';
+  // v108：「STPG370-S SCH80 PE」のように、鋼種の直後に数字が続く表記（STPG370）や、管端が「PE」の
+  //   表記が判定から漏れ、PIPEの行が「(品目未検出)」のまま残っていた。鋼種は直後が英字でなければ一致とし
+  //   （STPG370・SGP-E・TP-A等）、管端は BE／PE／TBE／TOE／POE を対象にする。
+  else if (/(^|[^A-Z])(STPG|STPT|STPY|STS|SGPW|SGP|TP)(?![A-Z])/.test(U) || /\b(BE|PE|TBE|TOE|POE)\b/.test(U)) guess = 'PIPE';
   else {
     const mm = size.match(/^(\d+(?:\.\d+)?A?)[×xX](\d+(?:\.\d+)?A?)$/);
     if (mm) {
@@ -6668,6 +7397,35 @@ function inferItemFromContentForInherited(row) {
   if (cur === 'GASKET' && guess === 'FLANGE') return '';
   if (cur === 'BLIND FLANGE' && guess === 'FLANGE') return '';
   return guess;
+}
+
+// v106（テスト）：品目名と行の内容の「矛盾チェック」。全行が対象で、値は書き換えず、画面で警告するだけ。
+// 背景：これまでの補正（v91/v103）は「引き継いだ行」「あいまい一致の行」「未検出の行」だけが対象で、
+// 品目名が一度「確定」扱いになった行（例：PIPEなのに90°ELBOWと確定した行）は、内容と矛盾していても
+// 誰もチェックしていなかった。品目名の決まり方に関係なく、内容から見て“あり得ない”組み合わせだけを拾う。
+// 誤警告を増やさないよう、確実に言える矛盾だけに絞っている。
+const ITEM_CONFLICT_COUNT_ITEMS = new Set(['90°ELBOW', '45°ELBOW', 'TEE', 'CON.REDUCER', 'ECC.REDUCER', 'FLANGE', 'GASKET']);
+function detectItemContentConflict(row) {
+  try {
+    if (!row || !row.item || row.item === '(品目未検出)') return null;
+    if (row.cellOverrides && Object.prototype.hasOwnProperty.call(row.cellOverrides, 'K')) return null; // 人が直接直した品目名は対象外
+    const item = row.item;
+    const qtyStr = String(row.qty == null ? '' : row.qty).trim();
+    const sizeStr = String(row.size || '').normalize('NFKC').replace(/\s/g, '');
+    // 規則1：継手・フランジ・ガスケットは「個数」なので小数にならない。小数はPIPEの長さ[m]の特徴。
+    if (ITEM_CONFLICT_COUNT_ITEMS.has(item) && /^\d+\.\d+$/.test(qtyStr) && Number(qtyStr) !== Math.floor(Number(qtyStr))) {
+      return { reason: `数量が小数（${qtyStr}）です。${item}は個数のため小数にならず、PIPE（長さ[m]）の行の可能性があります。`, suggest: 'PIPE' };
+    }
+    // 規則3（v107）：表の先頭のPIPEの見出しが検出できず、最初の品目の行にまとめられた可能性がある行。
+    if (row.itemBandSuspect) {
+      return { reason: '表の先頭にあるはずのPIPEの見出しが検出できなかったため、この行が' + item + 'として扱われた可能性があります（実際はPIPEの行かもしれません）。', suggest: 'PIPE' };
+    }
+    // 規則2：エルボのサイズに「A×B」（2口径表記）はあり得ない（TEE／レデューサーの表記）。
+    if ((item === '90°ELBOW' || item === '45°ELBOW') && /^\d+(?:\.\d+)?A?[×xX]\d+(?:\.\d+)?A?$/.test(sizeStr)) {
+      return { reason: `サイズが2口径表記（${row.size}）です。エルボではなくTEEまたはレデューサーの可能性があります。`, suggest: '' };
+    }
+  } catch (e) { /* チェック自体の失敗で表示を止めない */ }
+  return null;
 }
 
 async function enhanceRowsWithOCR(page, rows) {
@@ -7032,6 +7790,33 @@ function buildOutputRows() {
       // v35で追加：ITEM欄もプレビュー表から直接編集できるようにしたため、まずITEM自体の
       // マイ辞書補正を適用してからboltDisplayItem等の以降の判定に使う（ITEM辞書は品目名で
       // スコープすると循環してしまうため、他の3欄と違いスコープ無し＝共通の辞書として扱う）。
+      // v118：バルブの品目名が「E」「ALE」等の断片（縦書き「VALVE」の取りこぼし）のまま残っていたら、
+      //   出力の直前にVALVEへ直す（どの読み取り経路を通っても「E」で集計されないようにする最終安全策）。
+      //   ①英字だけの断片で、VALVEの文字を順番どおりに拾ったもの（E／AL／VAL等）
+      //   ②品目名が2文字以下の断片で、材質欄が弁の型式（VBS-11S・VSM-17等）のもの
+      //   ITEM列（K列）を手入力で直した行、既知の品目名の行には触れない。
+      if (m.item && !(m.cellOverrides && Object.prototype.hasOwnProperty.call(m.cellOverrides, 'K'))
+          && !MATERIAL_ROW_DEFS.some(d => { try { return d.test(String(m.item).trim()); } catch (err) { return false; } })) {
+        const descU = String(m.description || '').normalize('NFKC').toUpperCase();
+        const looksValveModel = /(^|[^A-Z])V[A-Z]{1,3}-?\d{1,3}[A-Z]?(?![A-Z0-9])/.test(descU);
+        if (isValveFragmentText(m.item) || (isFragmentItemName(m.item) && looksValveModel)) {
+          m.itemInheritedFromRaw = `${m.itemInheritedFromRaw || m.item}→VALVEの断片のためVALVEへ(出力時)`;
+          m.item = 'VALVE'; m.itemInherited = true; m.itemMatched = true;
+        }
+      }
+      // v119：どの読み取り経路を通っても、ITEM欄に「（認定品）」「（認定弁）」「（8割ナット）」等の注記が
+      //   入らないようにする最終安全策。注記を除いた品目名を使い、認定の印は残す（材質欄へ付記される）。
+      //   注記しか無い行は「(品目未検出)」にする。ITEM列（K列）を手入力で直した行には触れない。
+      if (m.item && !(m.cellOverrides && Object.prototype.hasOwnProperty.call(m.cellOverrides, 'K'))) {
+        const spN = splitItemNote(m.item);
+        if (spN.has) {
+          m.itemInheritedFromRaw = `${m.itemInheritedFromRaw || m.item}→注記を除去(出力時)`;
+          m.item = spN.base || '(品目未検出)';
+          applyItemNoteFlags(m, spN.kind);
+        }
+      }
+      // v123：数量欄の「※」は無視する（銅管など、どの品目でも同じ）。手入力した数量（cellOverrides）には触れない。
+      if (m.qty != null && /[※*＊]|^\s*[×xX米]+\s*\d/.test(String(m.qty))) m.qty = stripQtyMarks(m.qty);
       const itemDictFixed = applyOcrCellCorrectionForItem(m);
       const item = boltDisplayItem(m.item, m.boltType);
       // v34で追加：プレビュー表で直接編集して覚えさせたOCRセル修正辞書を最優先で適用する。
@@ -7164,9 +7949,12 @@ function buildOutputRows() {
         // v72：品目欄に「（認定弁）」と注記されたVALVE行は、材質欄の末尾に付記して分かるようにする
         // （品目名'VALVE'自体は集計・係数表のキーなので変更しない）。
         // v75：弁以外の品目で「（認定品）」と注記されたもの（例：OR）も同様に付記する。
-        material: (item === 'VALVE' && m.nintei && !/認定弁/.test(materialText))
+        // v122：認定の印は、必ず材質欄の末尾に付記する（ITEM欄には入れない）。
+        //   ・弁（VALVE、またはグローブ弁等「弁」で終わる品目）：「（認定弁）」
+        //   ・弁以外（OR等）で「認定品」の印があるもの：「（認定品）」
+        material: ((item === 'VALVE' || /弁$/.test(item)) && m.nintei && m.ninteiKind !== '認定品' && !/認定弁/.test(materialText))
           ? (materialText ? materialText + ' ' : '') + '（認定弁）'
-          : (item !== 'VALVE' && m.nintei && m.ninteiKind === '認定品' && !/認定品/.test(materialText))
+          : (item !== 'VALVE' && !/弁$/.test(item) && m.nintei && m.ninteiKind === '認定品' && !/認定品/.test(materialText))
             ? (materialText ? materialText + ' ' : '') + '（認定品）'
             : materialText,
         tag: m.tag || '',
@@ -7249,7 +8037,7 @@ const COLUMN_DEFS = [
   { col: 'H', header: 'LINE No.',      autoFilled: true,  get: r => r.lineNo },
   { col: 'I', header: '配管クラス',     autoFilled: true,  get: r => r.pipeClass },
   { col: 'J', header: 'ガスケットクラス', autoFilled: true, get: r => r.gasketClass },
-  { col: 'K', header: 'ITEM',          autoFilled: true,  get: r => r.itemLabel || r.item },
+  { col: 'K', header: 'ITEM',          autoFilled: true,  get: r => unifyLongVowelMark(r.itemLabel || r.item) },
   { col: 'L', header: 'サイズ',         autoFilled: true,  get: r => r.size },
   { col: 'M', header: '材質',           autoFilled: true,  get: r => r.material },
   { col: 'N', header: '数量',           autoFilled: true,  get: r => r.qty, numeric: true },
@@ -7343,6 +8131,7 @@ function formatPageLabel(e) {
 }
 
 function renderPreview() {
+  renderLoadedFilesBar();
   // v36で追加：セルを編集するたびに表全体を作り直すため、何もしないとスクロール位置が
   // 先頭に戻ってしまう（下の方のセルを編集しようとクリックすると上に戻ってしまう不具合の原因）。
   // 再描画の前にスクロール位置を覚えておき、再描画後に同じ位置へ戻す。
@@ -7368,7 +8157,7 @@ function renderPreview() {
   // 確実に材料表が存在しない正常なページであるため、この一覧への計上対象から外す
   // （ノイズが多く、確認の役に立たないため）。「アイソメ」「要確認」「不明」に
   // 分類される、本来は材料表があるはずのページだけを一覧に残す。
-  const noMaterialPages = pageData.filter(e => !e.readFailed && !e.hasOcrHardFailure && (!e.materials || !e.materials.length) && !['親図', '図書リスト'].includes(getDrawingSeries(e.drawingNo)));
+  const noMaterialPages = pageData.filter(e => !e.readFailed && !e.hasOcrHardFailure && (!e.materials || !e.materials.length) && !e.materialsSkippedBySeries && !['親図', '図書リスト'].includes(getDrawingSeries(e.drawingNo)));
   // v7で追加：材料表自体は見つかったが、その中の一部の品目（例：GASKET等の枠だけ）が
   // OCRでも最後まで読み取れず、行ごと出力から除外されたページ。「元々未使用の品目だった」
   // 可能性もあるが、「本来は記入があるのに読み取れなかった」可能性も否定できないため、
@@ -7399,6 +8188,31 @@ function renderPreview() {
             ${[...new Set(e.ocrIssues || [])].slice(0, 5).map(msg => `<li>${escapeHtml(msg)}</li>`).join('')}
           </ul>
         </li>`).join('')}
+      </ul>
+    </div>`;
+  }
+
+  // v107：200番台以外のため材料表を集計しなかったページの案内（「200番台以外の図面も集計する」がOFFのとき）。
+  const seriesSkippedPages = pageData.filter(e => !e.readFailed && e.materialsSkippedBySeries);
+  if (seriesSkippedPages.length) {
+    html += `<div class="note">
+      <strong>200番台以外の図面のため、材料表を集計していないページが${seriesSkippedPages.length}件あります。</strong>
+      これらの図面も集計する場合は、「200番台以外の図面も集計する」にチェックを入れて、もう一度読み取ってください。
+      <ul style="margin:8px 0 0; padding-left:18px;">
+        ${seriesSkippedPages.slice(0, 20).map(e => `<li>${escapeHtml(formatPageLabel(e))}${e.drawingNo ? '（' + escapeHtml(e.drawingNo) + '）' : ''}</li>`).join('')}
+        ${seriesSkippedPages.length > 20 ? `<li>…ほか${seriesSkippedPages.length - 20}件</li>` : ''}
+      </ul>
+    </div>`;
+  }
+
+  // v107：一部の欄だけ読み取りに失敗した行があるページ（全体エラーではないため従来は表に出なかった）。
+  const ocrPartialPages = pageData.filter(e => !e.readFailed && !e.hasOcrHardFailure && e.ocrIssues && e.ocrIssues.length);
+  if (ocrPartialPages.length) {
+    html += `<div class="note" style="background:var(--warn-bg); border-color:#E8C77A; color:#7a5a12;">
+      <strong>一部の欄でOCRの読み取りに失敗した行があるページが${ocrPartialPages.length}件あります。</strong>
+      該当行は空欄になっている可能性があるため、図面と見比べてご確認ください。
+      <ul style="margin:8px 0 0; padding-left:18px;">
+        ${ocrPartialPages.map(e => `<li>${escapeHtml(formatPageLabel(e))}${e.drawingNo ? '（' + escapeHtml(e.drawingNo) + '）' : ''}：${[...new Set(e.ocrIssues.map(m => String(m).split(':')[0]))].slice(0, 3).map(escapeHtml).join('／')}</li>`).join('')}
       </ul>
     </div>`;
   }
@@ -7559,8 +8373,9 @@ function renderPreview() {
     // PIPE・TEEのように品目ラベルが結合セルで印字されているテンプレートで、本来の
     // 品目名が別の品目名に静かに置き換わっていても気付けない不具合があった。
     const hasItemInherited = !!r.itemInherited;
+    const itemConflict = detectItemContentConflict(r); // v106テスト：品目名と内容の矛盾（全行対象）
     const trStyle = r.newDrawing ? ' style="border-top:3px solid var(--navy);"' : '';
-    const trClasses = [isOcr ? 'ocr-row' : '', hasSpecWarning ? 'spec-warn-row' : '', hasAutoFixed ? 'auto-fixed-row' : '', hasLowConfidence ? 'low-confidence-row' : '', hasItemInherited ? 'item-inherited-row' : ''].filter(Boolean).join(' ');
+    const trClasses = [isOcr ? 'ocr-row' : '', hasSpecWarning ? 'spec-warn-row' : '', hasAutoFixed ? 'auto-fixed-row' : '', hasLowConfidence ? 'low-confidence-row' : '', hasItemInherited ? 'item-inherited-row' : '', itemConflict ? 'item-conflict-row' : ''].filter(Boolean).join(' ');
     // テスト機能：自動修正された項目が、サイズ(L)・材質(M)のどちらの列に影響したかを
     // 判定し、実際に値が表示されているそのセル自体も色付けする（表の見た目上、
     // 「どこが直ったか」がY列を見なくても分かるようにするため）。
@@ -7640,7 +8455,10 @@ function renderPreview() {
           const itemScope = def.col === 'K' ? '' : r.item;
           const dictFixed = dictFixedMap.get(def.col);
           const isInheritedItemCell = def.col === 'K' && r.itemInherited;
-          const bgStyle = isInheritedItemCell
+          const isConflictItemCell = def.col === 'K' && !!itemConflict;
+          const bgStyle = isConflictItemCell
+            ? 'background:#FDE4E8; outline:3px solid #C0152F; outline-offset:-3px;'
+            : isInheritedItemCell
             ? 'background:#F1E6FA; outline:2px dashed #6A3AA0; outline-offset:-2px;'
             : (lowConfCols.has(def.col)
               ? 'background:#FDECEC; outline:2px solid #D9534F; outline-offset:-2px;'
@@ -7649,7 +8467,9 @@ function renderPreview() {
                   : (autoFixedCols.has(def.col) ? 'background:#E3F3E3;' : '')));
           const dictStyle = dictFixed ? 'color:#C0392B; font-weight:700;' : '';
           const _srcNote = (def.col === 'K' && r.itemSource) ? `【品目名の決まり方：${r.itemSource}／ITEM欄のOCR生結果：「${escapeHtml(r.itemRawOcrText || '')}」】 ` : '';
-          const title = _srcNote + (isInheritedItemCell
+          const title = _srcNote + (isConflictItemCell
+            ? `【要確認：品目名と内容が矛盾】${escapeHtml(itemConflict.reason)}図面と見比べてご確認ください。`
+            : isInheritedItemCell
             ? `この品目名はこの行自体からは読み取れず、近くの行（読み取れた表記：「${escapeHtml(r.itemInheritedFromRaw || '')}」）から引き継いだ推定値です。品目ラベルが複数行にまたがる結合セルのテンプレートで起きやすく、実際の品目と異なる場合があります。図面と見比べてご確認ください。`
             : (dictFixed
               ? `マイ辞書により自動修正されました：${escapeHtml(dictFixed.from)} → ${escapeHtml(dictFixed.to)}（誤りの場合はここをクリックして直接修正してください）`
@@ -7919,10 +8739,13 @@ const DIA_INCH_ITEM_FACTOR = {
   GASKET: 0,
   BOSS: 2,
   '90°ELBOW': 2,
+  '90°ショート': 2,
+  '45°ショート': 2,
   '45°ELBOW': 2,
   COUPLING: 2,
   'ハーフユニオン': 2,
   NIPPLE: 0,
+  '片ニップル': 0, // v124：六角ニップルと同じ扱い（溶接を伴わない・ダイヤインチの対象外）
   'BOLT&NUT': 0,
   // 種別判定後の表示名（boltDisplayItem）もここで引かれるため、同じく0倍で登録する
   'MACHINE BOLT&NUT': 0,
@@ -7936,7 +8759,7 @@ const DIA_INCH_ITEM_FACTOR = {
   'N2減圧弁': 0,
   '窒素ボンベ': 0,
   PLUG: 0,
-  'PRESSURE GAUGE': 0,
+  '圧力計': 0, 'PRESSURE GAUGE': 0,
   // LG・TG・VD：溶接を伴わない/対象外のため0倍
   LG: 0,
   TG: 0,
